@@ -1,0 +1,11 @@
+# CapoeiraAgent — exemplo de config.yaml global
+host:
+  base_url: http://127.0.0.1:8765
+  model: gemini-pro
+  timeout: 180
+  new_chat: false        # default do agente: reusa o chat aberto na aba
+  watch_timeout: 30
+policy:
+  mode: ask              # auto | ask | readonly
+  auto_plugins: []       # nomes de tools sempre autorizadas no modo ask
+python: python3

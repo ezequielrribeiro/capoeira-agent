@@ -1,0 +1,16 @@
+name: meu-projeto
+description: Sistema exemplo acompanhado pelo CapoeiraAgent.
+stack:
+  language: php
+  template_engine: n/a
+structure:
+  folders:
+    - app
+    - public
+    - database
+commands:
+  - example
+specs:
+  - project
+skills:
+  - procedure

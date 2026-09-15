@@ -1,0 +1,1 @@
+"""Comandos core do CapoeiraAgent (descoberta automática via core.loader)."""
