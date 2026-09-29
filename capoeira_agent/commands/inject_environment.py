@@ -1,6 +1,6 @@
+from capoeira_agent import llm_client
 from capoeira_agent.core.command import Command
 from capoeira_agent.injector import inject_environment
-from capoeira_agent import llm_client
 
 
 class InjectEnvironmentCommand(Command):
@@ -10,7 +10,7 @@ class InjectEnvironmentCommand(Command):
     def execute(self, args):
         premises = self.context.session.premises if hasattr(self.context.session, "premises") else None
         try:
-            reply = inject_environment(
+            ack = inject_environment(
                 self.context.client,
                 self.context.session,
                 self.context.registry,
@@ -18,10 +18,14 @@ class InjectEnvironmentCommand(Command):
                 new_chat=self.context.config.host.new_chat,
             )
         except llm_client.LLMRequestError as exc:
-            print(f"falha ao injetar ambiente: {exc}")
+            detail = str(exc)
+            print(f"falha ao injetar ambiente: {detail}")
+            if "503" in detail:
+                print("dica: o provedor do modelo está offline — confira se a aba do "
+                      f"provedor ({self.context.config.host.model}) está aberta e registrada "
+                      "no CapoeiraHost; rode /status para ver os providers online.")
             return
-        summary = reply.strip()
+        n_tools = len(self.context.registry.tool_definitions())
         print(f"ambiente injetado no chat ativo (new_chat={self.context.config.host.new_chat}). "
-              f"{len(self.context.registry.tool_definitions())} commandos expostos.")
-        if summary:
-            print(f"resposta do modelo: {summary[:200]}{'...' if len(summary) > 200 else ''}")
+              f"{n_tools} commandos expostos.")
+        print(f"host respondeu: {ack.strip()} — a resposta do modelo chegará via push.")

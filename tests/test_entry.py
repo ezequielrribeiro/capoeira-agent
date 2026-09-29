@@ -27,11 +27,11 @@ def test_bootstrap_builds_runtime(tmp_path):
         "model": "gemini-pro",
         "new_chat": "false",
         "base_url": "http://127.0.0.1:9999",
-        "watch_timeout": "2",
     }
     tui = entry.bootstrap(opts, prompt_override=lambda t, p: "n")
     assert tui.config.host.model == "gemini-pro"
     assert tui.config.host.new_chat is False
+    assert tui.config.host.app_port == 8767
     assert tui.session.slug == "projeto"
     assert tui.listener is not None
     assert tui.registry.get("/help") is not None

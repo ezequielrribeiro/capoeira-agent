@@ -4,7 +4,9 @@ host:
   model: gemini-pro
   timeout: 180
   new_chat: false        # default do agente: reusa o chat aberto na aba
-  watch_timeout: 30
+  app_host: 127.0.0.1    # API local do agente (receiver do push) — porta distinta do host
+  app_port: 8767
+  app_path: /api/capoeira/response
 policy:
   mode: ask              # auto | ask | readonly
   auto_plugins: []       # nomes de tools sempre autorizadas no modo ask

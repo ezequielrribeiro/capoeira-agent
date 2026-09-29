@@ -1,26 +1,32 @@
 from capoeira_agent.core.command import Command
+from capoeira_agent.core.parser import parse_flags
 
 
 class ModelCommand(Command):
     name = "model"
-    description = "Configura parâmetros de comunicação: /model M, /base-url URL, /timeout SEG, /new-chat [true|false]"
+    description = "Altera o modelo ativo: /model <nome> [--base-url URL] [--timeout SEG] [--new-chat true|false]"
 
     def execute(self, args):
-        sub = args[0] if args else ""
-        param = args[1] if len(args) > 1 else ""
         h = self.context.config.host
-        if sub == "model" and param:
-            h.model = param
-            print(f"modelo: {h.model}")
-        elif sub == "base-url" and param:
-            h.base_url = param.rstrip("/")
-            print(f"base_url: {h.base_url}")
-        elif sub == "timeout" and param:
-            h.timeout = int(param)
-            print(f"timeout: {h.timeout}s")
-        elif sub == "new-chat":
-            h.new_chat = param.lower() in ("true", "1") if param else not h.new_chat
-            print(f"new_chat: {h.new_chat}")
-        else:
-            print(f"uso: /model <nome> | /base-url <url> | /timeout <seg> | /new-chat [true|false]")
+        flags = parse_flags(args)
+
+        if not args or args[0].startswith("--"):
+            print("uso: /model <nome> [--base-url <url>] [--timeout <seg>] [--new-chat true|false]")
             print(f"atual: model={h.model} base_url={h.base_url} timeout={h.timeout} new_chat={h.new_chat}")
+            return
+
+        h.model = args[0]
+        self.context.client.model = args[0]
+        print(f"modelo: {h.model}")
+
+        if flags.get("base-url"):
+            h.base_url = str(flags["base-url"]).rstrip("/")
+            print(f"base_url: {h.base_url}")
+        if flags.get("timeout"):
+            h.timeout = int(flags["timeout"])
+            self.context.client.timeout = h.timeout
+            print(f"timeout: {h.timeout}s")
+        if "new-chat" in flags:
+            nc = flags["new-chat"]
+            h.new_chat = (str(nc).lower() in ("true", "1")) if isinstance(nc, str) else True
+            print(f"new_chat: {h.new_chat}")

@@ -30,7 +30,9 @@ class HostConfig:
     model: str = "gemini-pro"
     timeout: int = 180
     new_chat: bool = False
-    watch_timeout: int = 30
+    app_host: str = "127.0.0.1"
+    app_port: int = 8767
+    app_path: str = "/api/capoeira/response"
 
 
 @dataclass
@@ -74,8 +76,12 @@ class AgentConfig:
             self.host.timeout = int(host["timeout"])
         if host.get("new_chat") is not None:
             self.host.new_chat = bool(host["new_chat"])
-        if host.get("watch_timeout") is not None:
-            self.host.watch_timeout = int(host["watch_timeout"])
+        if host.get("app_host"):
+            self.host.app_host = str(host["app_host"])
+        if host.get("app_port") is not None:
+            self.host.app_port = int(host["app_port"])
+        if host.get("app_path"):
+            self.host.app_path = str(host["app_path"])
         if policy.get("mode"):
             self.policy.mode = str(policy["mode"])
         if policy.get("auto_plugins"):
@@ -93,8 +99,8 @@ class AgentConfig:
             self.host.new_chat = env["CAPOEIRA_AGENT_NEW_CHAT"].lower() in ("1", "true", "yes")
         if env.get("CAPOEIRA_AGENT_POLICY"):
             self.policy.mode = env["CAPOEIRA_AGENT_POLICY"]
-        if env.get("CAPOEIRA_AGENT_WATCH_TIMEOUT"):
-            self.host.watch_timeout = int(env["CAPOEIRA_AGENT_WATCH_TIMEOUT"])
+        if env.get("CAPOEIRA_AGENT_APP_PORT"):
+            self.host.app_port = int(env["CAPOEIRA_AGENT_APP_PORT"])
 
     def applies_new_chat(self) -> str:
         return "true" if self.host.new_chat else "false"

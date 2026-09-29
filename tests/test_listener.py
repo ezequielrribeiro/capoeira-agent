@@ -1,11 +1,24 @@
-import time
-
 from capoeira_agent.core.registry import CommandRegistry
 from capoeira_agent.executor import Executor
 from capoeira_agent.listener import Listener
 from capoeira_agent.llm_client import LLMClient
 from capoeira_agent.permissions import PermissionGate
 from capoeira_agent.session import Session
+
+
+class _StubReceiver:
+    def __init__(self):
+        self.listening = False
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.listening = True
+        self.started = True
+
+    def stop(self):
+        self.listening = False
+        self.stopped = True
 
 
 def _runtime(fake_host, tmp_path):
@@ -21,69 +34,103 @@ def _runtime(fake_host, tmp_path):
     return fh, session, registry, client, gate, executor
 
 
-def _send_round_of_listener(listener, delta, rev=1):
-    listener._process_delta(delta, rev)
+def _tool_results(fh):
+    """Requests de round-trip no fake host: o último par é o turno de resultado,
+    serializado no fio como role=assistant com [TOOL_RESULT] (pass-through verbatim)."""
+    out = []
+    for path, form in fh["ctrl"].chat_requests:
+        if path != "/api/chat":
+            continue
+        fields = dict(form)
+        if "TOOL_RESULT" in (fields.get("content") or ""):
+            out.append(fields)
+    return out
 
 
-def test_process_delta_runs_tool(fake_host, tmp_path):
+def _payload(text, error=None):
+    return {"request_id": "req-1", "model": "gemini-pro", "provider": "gemini",
+            "endpoint": "chat", "stream": False, "text": text, "error": error}
+
+
+def test_handle_response_runs_tool(fake_host, tmp_path):
     fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
-    listener = Listener(client, session, gate, executor, registry, watch_timeout=5, new_chat=False)
+    listener = Listener(client, session, gate, executor, registry, new_chat=False)
 
-    delta = "[USER] leia o arquivo por favor\n[ASSISTANT] [TOOL_CALL] read_file | path='dados.txt'\n"
-    _send_round_of_listener(listener, delta)
-    # o mirror registrou os turnos
+    listener.handle_response(_payload("[TOOL_CALL] read_file | path='dados.txt'\n"))
+
     contents = [m["content"] for m in session.messages()]
-    assert any("leia o arquivo" in c for c in contents)
-    # round-trip enviado com role=tool
-    tool_forms = [form for p, form in fh["ctrl"].chat_requests
-                  if p == "/api/chat" and dict(form).get("role") == "tool"]
-    assert tool_forms
-    assert "olá mundo" in dict(tool_forms[0]).get("content", "")
+    assert any("read_file" in c for c in contents)
+    results = _tool_results(fh)
+    assert results
+    assert "olá mundo" in results[0]["content"]
 
 
-def test_listener_round_trip_returns_prose_and_stops(fake_host, tmp_path):
+def test_handle_response_prose_mirrors_without_roundtrip(fake_host, tmp_path):
     fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
-    fh["ctrl"].chat_default = "finalizado com sucesso, sem mais chamadas."
-    listener = Listener(client, session, gate, executor, registry, watch_timeout=5, new_chat=False)
-    _send_round_of_listener(listener,
-                            "[USER] crie um arquivo\n"
-                            "[ASSISTANT] [TOOL_CALL] write_file | file_path='novo.txt' | "
-                            "action=create_file | code_content=b2xhCg==\n")
-    assert (tmp_path / "p" / "novo.txt").exists()
+    listener = Listener(client, session, gate, executor, registry, new_chat=False)
+
+    listener.handle_response(_payload("finalizado com sucesso, sem mais chamadas."))
+
     assert "finalizado com sucesso" in " ".join(m["content"] for m in session.messages())
+    assert not _tool_results(fh)
 
 
-def test_listened_tool_denied_when_policy_readonly(fake_host, tmp_path):
+def test_handle_response_error_emits(fake_host, tmp_path):
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    events: list[str] = []
+    listener = Listener(client, session, gate, executor, registry, on_event=events.append, new_chat=False)
+
+    listener.handle_response(_payload("", error="falha na injeção"))
+
+    assert any("falha na injeção" in e for e in events)
+    assert not _tool_results(fh)
+
+
+def test_handle_response_denied_when_policy_readonly(fake_host, tmp_path):
     fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
     gate.set_mode("readonly")
-    listener = Listener(client, session, gate, executor, registry, watch_timeout=5, new_chat=False)
-    fh["ctrl"].chat_default = "[TOOL_CALL] write_file | file_path='x.txt' | action=create_file | code_content=b2xhCg==\n"
-    _send_round_of_listener(listener,
-                            "[USER] crie x.txt\n"
-                            "[ASSISTANT] [TOOL_CALL] write_file | file_path='x.txt' | action=create_file | code_content=b2xhCg==\n")
+    listener = Listener(client, session, gate, executor, registry, new_chat=False)
+
+    listener.handle_response(_payload(
+        "[TOOL_CALL] write_file | file_path='x.txt' | action=create_file | code_content=b2xhCg==\n"))
+
     assert not (tmp_path / "p" / "x.txt").exists()
-    # nota de negação chegou ao modelo
-    round_forms = [form for p, form in fh["ctrl"].chat_requests if p == "/api/chat" and dict(form).get("role") == "tool"]
-    assert round_forms
-    assert "DENEGADO" in dict(round_forms[0]).get("content", "")
+    round_results = _tool_results(fh)
+    assert round_results
+    assert "DENEGADO" in round_results[0]["content"]
 
 
-def test_listener_start_injects_and_watches(fake_host, tmp_path):
+def test_handle_response_unrecognized_command_not_resent(fake_host, tmp_path):
     fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    events: list[str] = []
+    listener = Listener(client, session, gate, executor, registry, on_event=events.append, new_chat=False)
 
-    def fake_inject():
-        session.injected = True
-        session.save_state()
-        return "ok"
+    listener.handle_response(_payload("[TOOL_CALL] foobar | a=1\n"))
 
-    listener = Listener(client, session, gate, executor, registry, watch_timeout=1,
-                        inject_environment=fake_inject, new_chat=False)
+    assert not _tool_results(fh)
+    assert any("não reconhecido" in e for e in events)
+
+
+def test_handle_response_done_does_not_execute(fake_host, tmp_path):
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    listener = Listener(client, session, gate, executor, registry, new_chat=False)
+
+    listener.handle_response(_payload("[TOOL_CALL] done\n"))
+
+    assert not _tool_results(fh)
+
+
+def test_start_registers_and_stop_unregisters(fake_host, tmp_path):
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    listener = Listener(client, session, gate, executor, registry, app_port=8123, new_chat=False)
+    listener._receiver = _StubReceiver()
+
     listener.start()
-    try:
-        time.sleep(0.2)
-        assert session.injected
-        fh["ctrl"].push_watch(1, "[USER] oi\n[ASSISTANT] tudo bem\n")
-        time.sleep(0.3)
-        assert "oi" in " ".join(m["content"] for m in session.messages())
-    finally:
-        listener.stop()
+    assert listener.listening
+    assert fh["ctrl"].app_port == 8123
+    assert fh["ctrl"].register_requests
+
+    listener.stop()
+    assert not listener.listening
+    assert fh["ctrl"].unregister_requests == 1
+    assert fh["ctrl"].app_port is None

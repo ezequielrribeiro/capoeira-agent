@@ -1,7 +1,6 @@
-"""Cliente HTTP textual para o CapoeiraHost (v2.1.0): /api/chat, /api/chat/read, /api/chat/watch."""
+"""Cliente HTTP textual para o CapoeiraHost (pass-through verbatim): /api/chat + registro de app."""
 from __future__ import annotations
 
-import json
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,15 +13,8 @@ class LLMRequestError(Exception):
 
 @dataclass
 class ChatReply:
-    content: str  # prosa final e/ou linhas [TOOL_CALL]
-    revisions: str | None = None
-
-
-def serialize_tools(tools: list[dict]) -> str:
-    """tools textual: 'name=X | desc=... | arg:type' — uma linha por ferramenta."""
-    from .prompts import build_tools_declaration
-
-    return build_tools_declaration(tools)
+    content: str  # "accepted: {request_id}" (fire-and-forget)
+    request_id: str | None = None
 
 
 def _build_form(pairs: list[tuple[str, str]]) -> bytes:
@@ -58,70 +50,44 @@ class LLMClient:
     def chat(
         self,
         messages: list[dict],
-        tools: list[dict] | None = None,
         stream: bool = False,
-        on_chunk: callable | None = None,
         new_chat: bool | None = None,
     ) -> ChatReply:
+        """Chama /api/chat (pass-through verbatim no host): sem campo `tools` e
+        sem `role=tool`. Resultados de ferramenta (role=tool) são serializados
+        como turno assistant com `[TOOL_RESULT] (id) conteúdo`. O host responde
+        com `accepted: {request_id}` e entrega o resultado via push — o agente
+        NÃO faz polling nem aguarda a resposta aqui."""
         pairs: list[tuple[str, str]] = [("model", self.model)]
         for msg in messages:
             role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "tool":
+                tid = msg.get("tool_call_id")
+                prefix = f"[TOOL_RESULT] ({tid}) " if tid else "[TOOL_RESULT] "
+                role, content = "assistant", f"{prefix}{content}".strip()
             pairs.append(("role", role))
-            pairs.append(("content", msg.get("content", "")))
-            if role == "tool" and msg.get("tool_call_id"):
-                pairs.append(("tool_call_id", msg["tool_call_id"]))
-        if tools:
-            pairs.append(("tools", serialize_tools(tools)))
+            pairs.append(("content", content))
         if stream:
             pairs.append(("stream", "true"))
         if new_chat is not None:
             pairs.append(("new_chat", "true" if new_chat else "false"))
 
-        if stream and on_chunk is not None:
-            content = self._stream_chat(pairs, on_chunk)
-            return ChatReply(content=content)
-        body, headers = self._post("/api/chat", pairs)
-        return ChatReply(content=body, revisions=headers.get("X-Capoeira-Revision"))
+        body, _ = self._post("/api/chat", pairs)
+        return ChatReply(content=body, request_id=_parse_request_id(body))
 
-    def _stream_chat(self, pairs: list[tuple[str, str]], on_chunk) -> str:
-        data = _build_form(pairs)
-        req = urllib.request.Request(
-            f"{self.base_url}/api/chat",
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"},
-            method="POST",
+    # -- registro da aplicação (destino do push) ----------------------------
+    def register_app(self, port: int, host: str = "127.0.0.1", name: str = "capoeira-agent") -> str:
+        """Registra esta aplicação como destino do push do host."""
+        body, _ = self._post(
+            "/api/app/register",
+            [("port", str(port)), ("host", host), ("name", name)],
         )
-        chunks: list[str] = []
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                while True:
-                    raw = resp.read(512)
-                    if not raw:
-                        break
-                    piece = raw.decode("utf-8", errors="replace")
-                    chunks.append(piece)
-                    on_chunk(piece)
-            return "".join(chunks)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise LLMRequestError(f"HTTP {exc.code}: {detail}".strip()) from exc
-        except urllib.error.URLError as exc:
-            raise LLMRequestError(f"falha de rede: {exc.reason}") from exc
+        return body
 
-    # -- /api/chat/read ------------------------------------------------------
-    def read_chat(self) -> tuple[str, int]:
-        """Devolve (transcript, revision) do chat ativo."""
-        body, headers = self._post("/api/chat/read", [("model", self.model)])
-        revision = int(headers.get("X-Capoeira-Revision") or "0")
-        return body, revision
-
-    # -- /api/chat/watch -----------------------------------------------------
-    def watch(self, revision: int = 0, timeout: int = 30) -> tuple[str, int]:
-        """Long-poll: devolve (delta, nova_revision). Delta vazio = sem mudança."""
-        pairs = [("model", self.model), ("revision", str(revision)), ("timeout", str(timeout))]
-        body, headers = self._post("/api/chat/watch", pairs)
-        new_revision = int(headers.get("X-Capoeira-Revision") or str(revision))
-        return body, new_revision
+    def unregister_app(self) -> str:
+        body, _ = self._post("/api/app/unregister")
+        return body
 
     # -- utilidades ----------------------------------------------------------
     def providers(self) -> list[str]:
@@ -147,15 +113,9 @@ class LLMClient:
             return []
 
 
-def parse_delta_lines(delta: str) -> list[tuple[str, str]]:
-    """Converte linhas '[USER] ...' / '[ASSISTANT] ...' do delta em turnos."""
-    turns: list[tuple[str, str]] = []
-    for line in delta.splitlines():
-        line = line.strip()
-        if line.startswith("[USER] "):
-            turns.append(("user", line[len("[USER] "):]))
-        elif line.startswith("[ASSISTANT] "):
-            turns.append(("assistant", line[len("[ASSISTANT] "):]))
-        elif line.startswith("[USER]") or line.startswith("[ASSISTANT]"):
-            turns.append(("user" if line[1:5] == "USER" else "assistant", line.split("]", 1)[1].lstrip()))
-    return turns
+def _parse_request_id(body: str) -> str | None:
+    """Extrai o request_id de um corpo 'accepted: {uuid}'."""
+    marker = "accepted: "
+    if body.startswith(marker):
+        return body[len(marker):].strip() or None
+    return None

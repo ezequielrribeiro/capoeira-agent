@@ -1,4 +1,4 @@
-"""Fake CapoeiraHost (ThreadingHTTPServer) para testes — protocolo textual."""
+"""Fake CapoeiraHost (ThreadingHTTPServer) para testes — protocolo textual + push."""
 from __future__ import annotations
 
 import urllib.parse
@@ -15,19 +15,14 @@ class HostControl:
         self.reset()
 
     def reset(self) -> None:
-        self.transcript = ""
-        self.revision = 0
-        self.chat_bodies: list[str] = []  # fila de respostas de /api/chat
-        self.chat_default = "ok"
-        self.watch_items: list[tuple[int, str]] = []  # (revision, delta) — deltas a entregar
-        self.watch_timeout_ok = b""
         self.chat_requests: list[tuple[str, list[tuple[str, str]]]] = []
-        self.read_requests = 0
+        self.register_requests: list[dict] = []
+        self.unregister_requests = 0
+        self.app_port: int | None = None
+        self.app_host = "127.0.0.1"
+        self.app_name = ""
         self.fail_chat: str | None = None  # status code como str p/ 503 etc.
-
-    def push_watch(self, revision: int, delta: str) -> None:
-        self.watch_items.append((revision, delta))
-        self.revision = max(self.revision, revision)
+        self._request_counter = 0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -39,13 +34,11 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return urllib.parse.parse_qsl(raw.decode("utf-8"), keep_blank_values=True)
 
-    def _send(self, status: int, body: str, revision: int | None = None) -> None:
+    def _send(self, status: int, body: str) -> None:
         data = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        if revision is not None:
-            self.send_header("X-Capoeira-Revision", str(revision))
         self.end_headers()
         self.wfile.write(data)
 
@@ -58,25 +51,19 @@ class _Handler(BaseHTTPRequestHandler):
                 code = int(ctrl.fail_chat)
                 self._send(code, f"error {code}")
                 return
-            if ctrl.chat_bodies:
-                body = ctrl.chat_bodies.pop(0)
-            else:
-                body = ctrl.chat_default
-            self._send(200, body, ctrl.revision)
-        elif self.path == "/api/chat/read":
-            ctrl.read_requests += 1
-            self._send(200, ctrl.transcript, ctrl.revision)
-        elif self.path == "/api/chat/watch":
+            ctrl._request_counter += 1
+            self._send(200, f"accepted: req-{ctrl._request_counter}")
+        elif self.path == "/api/app/register":
             fields = dict(form)
-            rev = int(fields.get("revision", "0"))
-            pending = [it for it in ctrl.watch_items if it[0] > rev]
-            pending.sort(key=lambda it: it[0])
-            if pending:
-                target_rev, delta = pending[0]
-                ctrl.watch_items = [it for it in ctrl.watch_items if it[0] != target_rev]
-                self._send(200, delta, max(ctrl.revision, target_rev))
-            else:
-                self._send(200, "", ctrl.revision)
+            ctrl.app_port = int(fields.get("port", "0"))
+            ctrl.app_host = fields.get("host", "127.0.0.1")
+            ctrl.app_name = fields.get("name", "")
+            ctrl.register_requests.append(dict(fields))
+            self._send(200, f"ok host={ctrl.app_host} port={ctrl.app_port}")
+        elif self.path == "/api/app/unregister":
+            ctrl.unregister_requests += 1
+            ctrl.app_port = None
+            self._send(200, "ok")
         elif self.path == "/api/tags":
             self._send(200, "gemini-pro | provider=gemini | streaming=false\n")
         elif self.path == "/api/ps":

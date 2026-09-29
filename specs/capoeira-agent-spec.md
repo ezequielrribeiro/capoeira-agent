@@ -37,7 +37,7 @@ comandos de projeto/plugins), caso necessário.
 | Base | Papel |
 |---|---|
 | **CapoeiraCode** | Arquitetura de agente, contrato de ferramentas ([TOOLS] textual), execução de tools (`read_file`, `list_dir`, `run_shell`, `run_python`, `write_file`, `ask_user`, `done`), aplicador atômico, armazenamento/artefatos, política de permissão. |
-| **CapoeiraHost (v2.1.0)** | Único backend de comunicação; normal: `/api/chat` (textual) + **novo** `/api/chat/read` e `/api/chat/watch` (leitura do chat ativo via long-poll) — habilitam o modo "na escuta" sem substituir a interface web. |
+| **CapoeiraHost (v2.1.0+)** | Único backend de comunicação; `/api/chat` (textual) responde `accepted: {request_id}` (fire-and-forget) e entrega a resposta do LLM via **push** (`POST /api/capoeira/response`) na aplicação registrada em `/api/app/register` — habilita o modo "na escuta" sem substituir a interface web. |
 | **Cli-Crivonansky** | Framework CLI extensível: `core/command.py`, `registry`, `loader` (descoberta dinâmica de plugins via importlib), `context`, `parser`. |
 
 ### 1.3. Problema de Negócio
@@ -65,11 +65,11 @@ permissão do usuário.
 │                                                                                   │
 │  ┌──────────────┐    ┌───────────────────┐    ┌───────────────────────────────┐   │
 │  │ TUI          │    │ LISTENER          │    │ PERMISSION GATE               │   │
-│  │  · monitor   │◀──▶│  · /api/chat/watch│───▶│  · auto | ask | readonly      │   │
-│  │  · aprovação │    │  · /read          │    │  · y/n/a (sempre na sessão)   │   │
-│  │  · /comandos │    │  · parse de delta │    └──────────────┬────────────────┘   │
-│  │  · plugins   │    │  · round-trip     │                   │ aprovou?           │
-│  └──────────────┘    └─────────┬─────────┘                   ▼                    │
+│  │  · monitor   │◀──▶│  · receiver (push)│───▶│  · auto | ask | readonly      │   │
+│  │  · aprovação │    │  · handle_response│    │  · y/n/a (sempre na sessão)   │   │
+│  │  · /comandos │    │  · round-trip     │    └──────────────┬────────────────┘   │
+│  │  · plugins   │    └─────────┬─────────┘                   │ aprovou?           │
+│  └──────────────┘              │                             ▼                    │
 │                                │                     [TOOL] executores           │
 │                                │              (read/list/run_shell/run_python/  │
 │                                │               write_file/ask_user/done +plugins)│
@@ -79,8 +79,8 @@ permissão do usuário.
                                  │ HTTP (form-urlencoded → text/plain)
                                  │ 127.0.0.1:8765
 ┌────────────────────────────────▼───────────────────────────────────────────────┐
-│                              CAPOEIRAHOST (v2.1.0)                            │
-│      /api/chat · /api/chat/read · /api/chat/watch · /api/ps · /api/tags       │
+│                              CAPOEIRAHOST (v2.1.0+)                           │
+│      /api/chat · /api/app/register · /api/ps · /api/tags                       │
 └────────────────────────────────┬───────────────────────────────────────────────┘
                                  │ WS 127.0.0.1:8766 (JSON, nosso)
 ┌────────────────────────────────▼───────────────────────────────────────────────┐
@@ -92,6 +92,9 @@ permissão do usuário.
 │                       WEB LLM INTERFACE (aba autenticada)                     │
 │                usuário continua conversando NORMALMENTE aqui                  │
 └────────────────────────────────────────────────────────────────────────────────┘
+
+O host entrega a resposta do LLM à API local do agente (receiver) via
+`POST http://127.0.0.1:8767/api/capoeira/response` (JSON) — porta distinta da API do host.
 ```
 
 **Estado:** proposta (draft). Nenhum módulo implementado ainda.
@@ -106,7 +109,7 @@ permissão do usuário.
 | **Sessão do agente** | Contexto local por projeto (config + workspace + histórico). Persistente e retomável. |
 | **Turno** | Unidade de transcrição do chat: `[USER] ...` ou `[ASSISTANT] ...` (contrato textual do host). |
 | **Dicionário de comandos** | Contrato `tools` (textual) enviado ao host; define o que a LLM pode invocar. |
-| **Escuta (listening)** | Loop do agente sobre `/api/chat/watch` (long-poll) aguardando mensagens novas externas. |
+| **Escuta (listening)** | API local do agente (receiver) na escuta do push do host, aguardando a resposta do LLM. |
 | **Permission gate** | Política que decide se um comando remoto é executado, questionado ou negado. |
 | **Comando (tool)** | Operação executável localmente (core tool ou comando-plugin). Invocável pela LLM via `[TOOL_CALL]` e/ou via TUI (`/...`). |
 
@@ -117,65 +120,66 @@ permissão do usuário.
 - Python **3.10+** (multiplataforma).
 - [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) **>= 2.1.0** rodando
   em loopback (API `127.0.0.1:8765`, WS `127.0.0.1:8766`) com a extensão carregada e uma
-  aba autenticada do provedor **aberta**.
+  aba autenticada do provedor **aberta**. A API local do agente (receiver do push) escuta em
+  `127.0.0.1:8767` (porta distinta da API do host).
 - Chrome/Edge para a extensão MV3.
 - ⚠️ Respeitar o **disclaimer do CapoeiraHost**: ferramenta de baixo volume (fila FIFO, um
   turno por vez; risco de rate-limit). O agente deve ser **conservador no volume**.
 
 ---
 
-## 5. Comunicação com o CapoeiraHost (v2.1.0 — textual)
+## 5. Comunicação com o CapoeiraHost (textual)
 
 Protocolo único: **`application/x-www-form-urlencoded`** nas requisições e **`text/plain`**
 nas respostas. Sem JSON no fio (exceto `models.json` do host e o bridge WS host⇄extensão).
 
+> **Atualização pós-v2.1.0 (pass-through verbatim — host 21/09/2026):** o CapoeiraHost
+> **não processa mais tool calling**. `/api/chat` não aceita `tools` nem `role=tool`
+> (somente `user|assistant|system`; `role=tool` é descartado → se não sobrar mensagem,
+> `400`). O host devolve a resposta **verbatim** (sem extrair/limpar `[TOOL_CALL]`), o
+> system segue **sem tags próprias** e `options` é aceito, porém ignorado. Todo o contrato
+> de ferramentas (linhas `[TOOL] ...` + instrução `[TOOL_CALL] nome | chave=valor`) e a
+> devolução de resultados são responsabilidade **exclusiva do CapoeiraAgent**, embutidos
+> no texto das mensagens. `new_chat` default do host agora é `true`, mas o agente continua
+> mandando `new_chat=false` por requisição.
+
 ### 5.1. `POST /api/chat` — conversa / round-trip de tools
 
-Campos: `model`*, pares repetidos `role`/`content`, `tool_call_id` (para `role=tool`),
-`tools` (contrato textual), `stream`, `new_chat`, `option.<chave>`.
+Campos: `model`*, pares repetidos `role`/`content`, `stream`, `new_chat`, `option.<chave>`.
 
 - **`new_chat`** — default **`false`** no agente (configurável). Com `false`: a extensão
-  injeta no chat aberto; os headers de sistema (`[SYSTEM]`/`[OPTIONS]`/`[TOOLS]`) são
-  emitidos **somente na primeira interação da sessão**; nas iterações seguintes vai só o
-  transcript (sem repetir headers) até um `new_chat=true` reiniciar.
-- **`role=tool`** exige o campo `tools` no request (senão `400`); cada resultado carrega
-  **`tool_call_id`**.
-- **`tools`** — um tool por linha: `name=X | desc=... | arg:type`. Injeta `[TOOL] ...` e o
-  contrato `[MODE TOOL_CALLING]` no envelope do system prompt da **primeira interação**.
-- Resposta: `text/plain`. Com `tools`, devolve **ou** as linhas `[TOOL_CALL] nome |
-  chave=valor` (prosa removida) **ou** a prosa final (linhas removidas). Sem `tools`,
-  devolve o texto do modelo.
+  injeta no chat aberto; o system do perfil só é emitido **na primeira interação da
+  sessão**; nas iterações seguintes vai só o transcript (sem repetir o system) até um
+  `new_chat=true` reiniciar.
+- **Roles aceitos:** `user|assistant|system` (qualquer outro, inclusive `tool`, é
+  descartado pelo host → `400` se não sobrar mensagem).
+- **Contrato de tools:** o agente embute o dicionário de comandos **no conteúdo da
+  própria mensagem `role=system`** — `[TOOL] name=X | desc=... | arg:type` (uma por
+  linha) + a instrução de emissão `[TOOL_CALL] nome | chave=valor` (`injector`/
+  `prompts.build_tools_block`). Não há campo `tools` no form.
+- **Round-trip:** o resultado de cada execução volta ao modelo como **turno `assistant`**
+  com conteúdo `[TOOL_RESULT] (id) resultado` — `llm_client.chat` faz essa serialização
+  quando uma mensagem interna tem `role=tool`/`tool_call_id`.
+- Resposta: `text/plain` **verbatim** (prosa + linhas `[TOOL_CALL]` juntas, sem parse pelo
+  host); o agente extrai as chamadas com `parse_tool_calls`.
 - **Valores** `[TOOL_CALL]`: números/booleans diretos; strings com espaço entre `'...'`;
   `|` fora de aspas separa argumentos; múltiplas linhas = chamadas paralelas.
-  `[TOOL_RESULT] (id) conteúdo` associa resultado e chamada no transcript.
 
-### 5.2. `POST /api/chat/read` — ler o chat ativo
+### 5.2. Push da resposta — `POST /api/capoeira/response` (host → agente)
 
-Campo: `model`*. Devolve o **transcript atual** da aba, um turno por linha
-(`[USER]`/`[ASSISTANT]`), e o header **`X-Capoeira-Revision`** com a última revisão conhecida
-pelo watcher. Provider offline → `503`; sem suporte a transcript → `501`.
+O host entrega a resposta do LLM à aplicação registrada (a API local do agente) via
+`POST http://<host>:<port>/api/capoeira/response` com corpo **JSON** contendo `request_id`,
+`model`, `provider`, `endpoint` (`chat`/`generate`), `stream`, `text`, `timestamp` e, em
+falha de geração, `error`. O agente **não faz polling** — apenas registra-se e processa as
+respostas conforme chegam.
 
-- Uso no agente: sincronizar a `revision` inicial, reconciliar o `session.jsonl` e
-  alimentar o monitor da TUI (ex.: após iniciar a escuta e a cada `/layout`/`/status`).
+- Registro: `POST /api/app/register` (form `port`/`host`/`name`) vincula o destino do push;
+  `POST /api/app/unregister` desfaz. Sem app registrada, o host tenta a porta padrão
+  (`8767`) em best-effort.
+- O agente sobe a API local (`receiver.py`, FastAPI/uvicorn) em `127.0.0.1:8767` e despacha
+  cada payload para `listener.handle_response`.
 
-### 5.3. `POST /api/chat/watch` — gatilho de mudança (long-poll)
-
-Campos: `model`*, `revision` (última vista; default `0`), `timeout` (s; default
-`CAPOEIRA_WATCH_TIMEOUT`, limitado por ele).
-
-- Bloqueia até surgir **mensagem nova externa** (humana) na aba e devolve **somente o delta**
-  (`[USER]`/`[ASSISTANT]`) + header `X-Capoeira-Revision` atualizado. Sem mudança dentro do
-  `timeout` → `200` com **corpo vazio**.
-- **Anti-eco:** mudanças causadas pelo próprio agente (via `/api/chat` com `new_chat=false`)
-  são **silenciadas** pelo watcher — só conteúdo externo dispara `CHAT_UPDATE`. Leitura de
-  DOM local, sem requisição extra ao LLM.
-- Provider offline → `503`; sem transcript → `501`.
-
-> É **este** endpoint que concretiza o "agente na escuta": o usuário digita na aba, a LLM
-> responde na aba, e o agente recebe o delta quando a conversa muda — sem jamais "dirigir" a
-> geração e sem interferir na interface web.
-
-### 5.4. Conteúdo binário/arquivos — base64 estrito
+### 5.3. Conteúdo binário/arquivos — base64 estrito
 
 Para robustez de transporte (o fio é texto puro), **todo conteúdo de arquivo/código/diff**
 que viaja em `[TOOL_CALL]` (ex.: `write_file.code_content`, `run_python.code`) é **base64
@@ -193,46 +197,46 @@ instruindo o reenvio em uma única linha. (Contrato herdado do CapoeiraCode §5.
    projeto; resolve configuração (host, modelo, política). O listener está **parado** até
    iniciado (ver `/listen`).
 2. **Injeção de ambiente** — `/inject-environment` (ou primeiro `/listen` sem injetar) envia
-   `POST /api/chat` com `new_chat=false` + `tools` (dicionário de comandos) + mensagem de
-   sistema com perfil do projeto. Como é a **primeira interação da sessão**, os headers
-   `[SYSTEM]`/`[OPTIONS]`/`[TOOLS]`/`[MODE TOOL_CALLING]` são emitidos na aba aberta. A partir
+   `POST /api/chat` com `new_chat=false` + mensagem `role=system` contendo o perfil do
+   projeto e o **contrato completo de tools embutido no texto** (linhas `[TOOL] ...` +
+   instrução `[TOOL_CALL] nome | chave=valor` — `prompts.build_tools_block`). O host responde
+   `accepted: {request_id}` (fire-and-forget); a resposta do modelo chega via push. Como é a
+   **primeira interação da sessão**, o system do perfil é emitido na aba aberta. A partir
    daí a LLM **conhece os comandos disponíveis**.
-3. **Sincronia** — `POST /api/chat/read` obtém o transcript atual e a `revision` inicial
-   (exposto no monitor da TUI; reconciliado com `session.jsonl`).
-4. **Escuta** — loop: `POST /api/chat/watch` (`model`, `revision=última vista`,
-   `timeout=--watch-timeout`).
-   - Corpo **vazio** ⇒ sem mudança; continua o loop.
-   - **Delta** ⇒ atualiza `revision`; registra turnos no log/monitor; inspeciona conteúdo
-     `[ASSISTANT]`:
-     - **Sem** `[TOOL_CALL]` ⇒ turno de prosa (a LLM respondeu normalmente); nada a executar;
-       continua escutando.
-     - **Com** `[TOOL_CALL] nome | chave=valor` (1+ linhas) ⇒ comandos a executar.
+3. **Escuta** — `/listen` sobe a API local (receiver) e registra o agente no host
+   (`/api/app/register`). A partir daí o agente **não faz polling**: cada resposta do LLM
+   chega via `POST /api/capoeira/response` e é processada por `listener.handle_response`.
+4. **Processamento do push** — o texto da resposta é espelhado no monitor; se contiver
+   `[TOOL_CALL] nome | chave=valor` (1+ linhas), os comandos são executados:
+   - **Sem** `[TOOL_CALL]` ⇒ turno de prosa (a LLM respondeu normalmente); nada a executar.
+   - **Com** `[TOOL_CALL]` ⇒ comandos a executar.
 5. **Permission gate** — para cada chamada: leitura automática; escrita/execução conforme
    política (`auto`/`ask`) e modo (`readonly`) — ver §9. Em `ask`, a TUI notifica e aguarda
-   `y`/`n`/`a`. **Enquanto aguarda aprovação, o listener pausa.**
+   `y`/`n`/`a`.
 6. **Execução** — roda cada passo no diretório do projeto (subprocess/timeout/saída truncada),
    aplica `write_file` via applier atômico (RNF-04), executa comandos-plugin.
-7. **Round-trip** — envia `POST /api/chat` com `role=tool` + `tool_call_id` + resultado
-   (`[TOOL_RESULT] (id) ...` injetado na aba; **sem eco** no watcher). Repete até a resposta
-   ser **prosa final** (sem `[TOOL_CALL]`). A resposta final da LLM já aparece na aba,
-   visível ao usuário.
-8. Volta ao passo 4.
+7. **Round-trip** — o host é pass-through e não aceita `role=tool`; portanto o resultado é
+   serializado **no texto do próprio transcript** como turno `assistant` com
+   `[TOOL_RESULT] (call_N) ...` via `POST /api/chat` (`new_chat=false`; fire-and-forget). A
+   próxima resposta do modelo chega por um novo push; o ciclo se repete até a resposta ser
+   **prosa final** (sem `[TOOL_CALL]`), com proteção de limite de rounds. A resposta final da
+   LLM já aparece na aba, visível ao usuário.
 
 ### 6.2. Controle
 
 | Ação | Descrição |
 |---|---|
-| `/listen` | inicia a escuta (loop watch). Se for a primeira interação da sessão e ainda não houve injeção, injeta ambiente automaticamente. |
-| `/listen stop` | encerra o loop (requisição `watch` é cancelada/expira). |
+| `/listen` | sobe a API local (receiver) e registra o agente no host como destino do push. Se for a primeira interação da sessão e ainda não houve injeção, injeta ambiente automaticamente. |
+| `/listen stop` | desregistra o agente do host e derruba a API local. |
 | `Ctrl+C` | interrompe o round-trip em andamento (também sai de aprovação pendente). |
 
 ### 6.3. Robustez
 
-- `revision` é **monotônica** (nunca reseta, mesmo em chat novo); o agente reseta o baseline
-  via `/api/chat/read` quando detecta inconsistência ou a pedido do usuário.
-- Timeouts longos são esperados (long-poll). Falha de transiente (`503` offline) ⇒ log +
-  backoff curto e retomada; não desliga o listener.
-- Deduplicação: processa apenas **deltas não vistos** (marca pela `revision`).
+- O agente **não faz polling**: respostas chegam via push; falha de entrega do host é
+  best-effort (logada e ignorada pelo host, sem retry).
+- Falha de transiente (`503` offline) na injeção/round-trip ⇒ log + retomada; não desliga o
+  listener.
+- Proteção contra loop de tool calls: limite de rounds consecutivos (máx. 12).
 
 ---
 
@@ -259,12 +263,19 @@ Cada plug-in pode expor uma tool ao declarar `tool_def`. O dicionário completo 
 `/inject-environment` e **atualizado a cada injeção**. Comandos de ferramenta da TUI que **não**
 expõem `tool_def` ficam fora do dicionário (inacessíveis à LLM — princípio de menor privilégio).
 
-### 7.3. `[TOOLS]` → `tools` textual (serialização)
+### 7.3. Contrato de tools (bloco embutido no texto — `prompts.build_tools_block`)
+
+Como o host é **pass-through**, o dicionário viaja no conteúdo da mensagem `role=system` do
+`/inject-environment`, um tool por linha prefixado com `[TOOL]` + o contrato de emissão
+`[TOOL_CALL] nome | chave=valor`:
 
 ```text
-name=read_file | desc=Lê um arquivo do projeto. | path:string
-name=write_file | desc=Escreve/edita arquivo (base64). | file_path:string | action:string | code_content:string
-name=deploy | desc=Comando-plugin exemplo: rotina de deploy do projeto. | env:string
+[TOOL] name=read_file | desc=Lê um arquivo do projeto. | path:string
+[TOOL] name=write_file | desc=Escreve/edita arquivo (base64). | file_path:string | action:string | code_content:string
+[TOOL] name=deploy | desc=Comando-plugin exemplo: rotina de deploy do projeto. | env:string
+
+Se for necessário chamar uma ferramenta, emita EXATAMENTE uma linha por chamada neste formato:
+[TOOL_CALL] nome_da_ferramenta | chave1=valor1 | chave2=valor2
 ```
 
 ---
@@ -317,7 +328,7 @@ Na TUI, para cada comando pendente: **`y`** (permitir), **`n`** (negar), **`a`**
 
 ```text
 capoeira-agent [PATH] [--config DIR] [--project NOME] [--session NOME] [--model M]
-               [--base-url URL] [--timeout SEG] [--poll/--watch-timeout SEG]
+               [--base-url URL] [--timeout SEG]
                [--policy auto|ask|readonly] [--readonly] [--new-chat true|false] [--help]
 python -m capoeira_agent [PATH] [...]      # equivalente
 ```
@@ -327,7 +338,7 @@ python -m capoeira_agent [PATH] [...]      # equivalente
 
 ### 10.2. Painel de monitor
 
-Regiões/insights: estado do provider (`/api/ps`), último turno do chat, `revision`, fila de
+Regiões/insights: estado do provider (`/api/ps`), último turno do chat, fila de
 aprovações pendentes, histórico de comandos executados/negados compatível com o `session.jsonl`.
 
 ### 10.3. Comandos core
@@ -337,12 +348,11 @@ aprovações pendentes, histórico de comandos executados/negados compatível co
 | `/help` | ajuda |
 | `/init` | cria os **artefatos iniciais do projeto** (árvore de arquivos; pastas `specs/` e `skills/` com exemplos; pasta de comandos-plugin com exemplo; `README` de uso). **Local a validar** (§11.2). |
 | `/inject-environment` | envia ao chat ativo o prompt com o ambiente do projeto + **dicionário de comandos** (`tools`), via `POST /api/chat` (`new_chat=false`, 1ª interação ⇒ headers `[TOOLS]`). Idempotente; re-emite (a pedido) para atualizar o dicionário. |
-| `/listen` · `/listen stop` | inicia/pára a escuta (watch long-poll). |
-| `/status` | provider/modelo online, `revision`, sessão, política, fila. |
+| `/listen` · `/listen stop` | sobe/derruba a API local (receiver) e registra/desregistra o agente no host (push). |
+| `/status` | provider/modelo online, sessão, política, fila, estado do receiver. |
 | `/permissions [auto|ask|readonly]` | ver/trocar política. |
 | `/model M` · `/base-url URL` · `/timeout SEG` | parâmetros de comunicação (estilo CapoeiraCode). |
 | `/new-chat [true|false]` | alternar reuso do chat na aba. |
-| `/read` | re-sincronizar transcript + revision via `/api/chat/read`. |
 | `/sessions` · `/use NOME` · `/reset` | multi-sessões/histórico. |
 | `/generate-plugin --name X` | cria plug-in (ver §8). |
 | `/quit` · `Ctrl+D` | sair. |
@@ -362,12 +372,12 @@ Resolução: `CAPOEIRA_AGENT_CONFIG_DIR` → `%APPDATA%\CapoeiraAgent` → `~/.c
 
 ```
 CapoeiraAgent/
-├── config.yaml               # host, modelo, política, new_chat, watch-timeout, python
+├── config.yaml               # host, modelo, política, new_chat, app_host/app_port/app_path, python
 ├── projects/*.yaml           # premissas por projeto (estilo CapoeiraCode: name, desc, stack, comandos-plugin selecionados)
 ├── commands/                 # plugins compartilhados (opcional)
 ├── specs/ · skills/ · prompts/  # instruções por projeto (carregadas na injeção de ambiente)
 └── configs/<slug>/
-    ├── workspace/            # artifacts: tree.txt, session.jsonl, estado/revision
+    ├── workspace/            # artifacts: tree.txt, session.jsonl, estado
     └── sessions/<nome>/session.jsonl   # histórico de turnos + execuções (retomável; default: default)
 ```
 
@@ -380,7 +390,7 @@ Premissa sugerida (híbrida): `/init` escreve **no diretório do projeto**:
 ├── specs/                    # exemplos .md
 ├── skills/                   # exemplos .md
 ├── commands/                 # exemplo de plug-in (além do core/config)
-├── .capoeira-agent/          # estado runtime local do agente (revision, cache)
+├── .capoeira-agent/          # estado runtime local do agente (cache)
 └── README-agente.md          # instruções de uso
 ```
 
@@ -390,8 +400,7 @@ Configuração global/per-servidor e workspace de sessão permanecem no diretór
 ### 11.3. Sessão
 
 `session.jsonl` grava: turnos observados (user/assistant), comandos solicitados pela LLM,
-veredito de aprovação, resultados (`ok/erro`), timestamps e `revision` associada. Serve de
-log auditável e de reconciliação com `/api/chat/read`.
+veredito de aprovação, resultados (`ok/erro`) e timestamps. Serve de log auditável.
 
 ---
 
@@ -405,7 +414,9 @@ host:
   model: gemini-pro
   timeout: 180
   new_chat: false          # default do agente
-  watch_timeout: 30
+  app_host: 127.0.0.1      # API local do agente (receiver do push) — porta distinta do host
+  app_port: 8767
+  app_path: /api/capoeira/response
 policy:
   mode: ask                # auto | ask | readonly
   auto_plugins: []         # nomes de comandos sempre autorizados (modo ask)
@@ -417,7 +428,7 @@ projects:
 ### 12.2. Env (overlay)
 
 `CAPOEIRA_AGENT_CONFIG_DIR`, `CAPOEIRA_AGENT_BASE_URL`, `CAPOEIRA_AGENT_MODEL`,
-`CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`, `CAPOEIRA_AGENT_WATCH_TIMEOUT`.
+`CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`, `CAPOEIRA_AGENT_APP_PORT`.
 
 ### 12.3. Por projeto
 
@@ -427,7 +438,7 @@ exposição `tool_def`), `specs`/`skills` selecionados (para injeção de ambien
 
 ---
 
-## 13. Multiplataforma (Windows · Linux · Docker)
+## 13. Multiplataforma (Windows · Linux · macOS)
 
 ### 13.1. Instalação (idêntica via venv + pip)
 
@@ -438,16 +449,13 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -e .                      # entry 'capoeira-agent'
 ```
 
-### 13.2. Docker
-
-`Dockerfile` base `python:3.12-slim`; instala o pacote (`pip install -e .`), expõe o
-diretório do projeto via volume (`-v /projeto:/ws`), roda `capoeira-agent "/ws"`. Procedimentos
-de execução mantidos idênticos entre plataformas (mesmo entry point, mesmas flags).
-
-### 13.3. Reconhecimento
+### 13.2. Reconhecimento
 
 Python CLI + `Path`/`os` (`C:\...` vs `/...`); subprocess sem shell onde possível; nenhuma
-dependência nativa compilada (apenas stdlib + `prompt_toolkit` + `rich` + `PyYAML`).
+dependência nativa compilada (apenas stdlib + `prompt_toolkit` + `rich` + `PyYAML` +
+`fastapi` + `uvicorn`). A API local do agente (`receiver.py`) usa FastAPI/uvicorn — Python
+puro, **independente de sistema operacional** — e escuta em `127.0.0.1:8767`, porta distinta
+da API do host (`8765`).
 
 ---
 
@@ -458,12 +466,12 @@ dependência nativa compilada (apenas stdlib + `prompt_toolkit` + `rich` + `PyYA
 - **RNF-04 (Atomicidade):** `write_file` e lotes multi-arquivo aplicados via
   tmp + `os.replace` all-or-nothing (herdado do CapoeiraCode); sem escrita parcial.
 - **RNF-05 (Não-interferência):** o agente nunca dispara geração por conta própria; só reage
-  a turnos **externos** (watch) — a interface web continua sendo a experiência primária.
+  a respostas **externas** (push) — a interface web continua sendo a experiência primária.
 - **RNF-06 (Volume conservador):** 1 requisição em andamento por vez; respeito à fila FIFO e
   ao disclaimer do host.
 - **RNF-07 (Auditoria):** toda execução remota registrada no `session.jsonl` (comando, veredito,
-  resultado, `revision`).
-- **RNF-08 (Multiplataforma):** Windows/Linux/Docker com procedimentos equivalentes.
+  resultado).
+- **RNF-08 (Multiplataforma):** Windows/Linux/macOS com procedimentos equivalentes.
 - **RNF-09 (Textual):** sem JSON no fio; base64 estrito para conteúdo binário/code.
 
 ---
@@ -475,11 +483,12 @@ capoeira-agent/
 ├── capoeira_agent/
 │   ├── __init__.py
 │   ├── entry.py             # `capoeira-agent [PATH] [flags]` → TUI (única interface)
-│   ├── llm_client.py        # /api/chat · /api/chat/read · /api/chat/watch (urllib; text)
+│   ├── llm_client.py        # /api/chat (urllib; text) + /api/app/register|unregister
 │   ├── prompts.py           # contrato TOOLS_CONTRACT; builder do /inject-environment
 │   ├── config.py            # resolve config dir; config.yaml + env overlay; premises
-│   ├── session.py           # configs/<slug>/ + session.jsonl + revision
-│   ├── listener.py          # loop de escuta (watch long-poll) + parse de delta
+│   ├── session.py           # configs/<slug>/ + session.jsonl
+│   ├── receiver.py          # API local (FastAPI/uvicorn) na escuta do push do host
+│   ├── listener.py          # handle_response (push) + round-trip de tools
 │   ├── permissions.py       # PermissionGate (auto/ask/readonly; y/n/a na sessão)
 │   ├── executor.py          # apply_step: read/list/run_shell/run_python/write_file/ask_user
 │   ├── applier.py           # aplicador atômico multi-arquivo (write_file)
@@ -497,9 +506,8 @@ capoeira-agent/
 │   └── tui/
 │       ├── app.py           # prompt_toolkit + rich; monitor + input de comandos
 │       └── monitor.py       # painel de estado/eventos/aprovações
-├── tests/                   # pytest (client fake do host; watcher fake; policies; tools)
+├── tests/                   # pytest (client fake do host; receiver; policies; tools)
 ├── examples/                # config.yaml template + projects/<slug>.yaml
-├── Dockerfile               # multiplataforma (python:3.12-slim)
 ├── pyproject.toml           # entry `capoeira-agent` (pip install -e .)
 ├── requirements.txt · requirements-dev.txt
 ├── conftest.py
@@ -513,11 +521,11 @@ capoeira-agent/
 
 ```python
 # llm_client.py
-class ChatReply: content: str  # prosa final e/ou linhas [TOOL_CALL]
+class ChatReply: content: str  # "accepted: {request_id}" (fire-and-forget)
 class LLMClient(base_url, model, timeout):
-    chat(messages, tools=None, stream=False, on_chunk=None, new_chat=False) -> ChatReply
-    read_chat() -> tuple[str, int]                      # transcript, revision
-    watch(revision: int, timeout: int) -> tuple[str, int]  # delta, revision nova
+    chat(messages, stream=False, new_chat=False) -> ChatReply
+    register_app(port, host, name) -> str
+    unregister_app() -> str
 class LLMRequestError(Exception)
 serialize_tools(tools: list[dict]) -> str
 
@@ -525,7 +533,7 @@ serialize_tools(tools: list[dict]) -> str
 class Listener(client, session, permissions, tui):
     start() / stop()
     @property listening: bool
-    _on_delta(delta: str, revision: int) -> None   # parse [TOOL_CALL] → gate → exec → round-trip
+    handle_response(payload: dict) -> None   # parse [TOOL_CALL] → gate → exec → round-trip
 
 # permissions.py
 class PermissionGate(mode):
@@ -550,13 +558,13 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 
 | Iteração | Entrega |
 |---|---|
-| **I1 — Esqueleto e host** | entry + TUI mínima + `config.py` + `llm_client` (`/api/chat`, `read`, `watch`) + teste com host fake. |
+| **I1 — Esqueleto e host** | entry + TUI mínima + `config.py` + `llm_client` (`/api/chat` + registro de app) + teste com host fake. |
 | **I2 — Framework de comandos** | `core/*` (Crivonansky) + `commands/` core + `/init` + `/generate-plugin`. |
-| **I3 — Listener + permissions** | loop de escuta (watch), delta parser, permission gate (auto/ask/readonly, y/n/a), executor core + applier atômico. |
+| **I3 — Listener + permissions** | receiver (push) + `handle_response`, permission gate (auto/ask/readonly, y/n/a), executor core + applier atômico. |
 | **I4 — Injeção e round-trip** | `/inject-environment` (dicionário), base64 estrito, round-trip `role=tool`. |
-| **I5 — Sessões e monitor** | `session.jsonl`, multi-sessões, painel de monitor, `/read`, reconciliação. |
+| **I5 — Sessões e monitor** | `session.jsonl`, multi-sessões, painel de monitor. |
 | **I6 — Premises/artefatos** | `projects/<slug>.yaml`, specs/skills/prompts, árvore do `/init` customizável. |
-| **I7 — Distribuição** | Dockerfile, docs multiplataforma, testes E2E (host fake + extensão fake). |
+| **I7 — Distribuição** | docs multiplataforma, testes E2E (host fake + extensão fake). |
 
 ---
 
@@ -569,7 +577,7 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 3. **`/listen` público** (comando da TUI inicia a escuta) vs escuta automática ao abrir.
 4. **Hierarquia de plugins** — projeto → config → package (ordem de precedência).
 5. **Política default** — `ask` para escrita/execução (sugerido), leitura automática.
-6. **Versionamento mínimo** do CapoeiraHost: `>= 2.1.0` (por `read`/`watch`).
+6. **Versionamento mínimo** do CapoeiraHost: `>= 2.1.0` (por push `/api/capoeira/response`).
 
 ---
 
@@ -578,3 +586,5 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 | Versão | Data | Descrição |
 | --- | --- | --- |
 | `0.1.0` | 15/09/2026 | Draft inicial da spec baseado em CapoeiraCode v6.0.0, CapoeiraHost **v2.1.0** (novos `/api/chat/read` e `/api/chat/watch` para o modo escuta) e Cli-Crivonansky (framework de plugins). |
+| `0.1.1` | 21/09/2026 | Adequação ao CapoeiraHost **pass-through verbatim** (commit `d1d00ab`): sem `tools`/`role=tool`/`tool_call_id` na API; contrato de tools embutido no texto da mensagem de sistema (`prompts.build_tools_block`); round-trip de resultados via turno `assistant` com `[TOOL_RESULT] (id) ...` (`llm_client.chat`). |
+| `0.1.2` | 28/09/2026 | Adequação ao CapoeiraHost **push** (commit `fb55cbb`): `/api/chat` responde `accepted: {request_id}` (fire-and-forget) e entrega a resposta via `POST /api/capoeira/response` na app registrada em `/api/app/register`. O agente sobe a API local (`receiver.py`, FastAPI/uvicorn) e processa respostas via `listener.handle_response` — sem polling (`/api/chat/read`/`watch` removidos). Removido o `Dockerfile`; a API do agente escuta em `127.0.0.1:8767`, porta distinta da API do host. |

@@ -4,18 +4,60 @@ from __future__ import annotations
 import contextlib
 import io
 import queue
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.patch_stdout import patch_stdout
+from prompt_toolkit.styles import Style
 from rich.console import Console
 
 from capoeira_agent.core.parser import parse_line
 
 STYLE = "bold cyan"
 HINT = "capoeira-agent> "
+
+
+class _LiveStdout:
+    """Encaminha para o sys.stdout vigente a cada chamada. Assim os prints (do
+    listener em thread) saem pelo StdoutProxy do patch_stdout durante a TUI e a
+    formatação rich/prompt_toolkit não é corrompida (sem sequências \x1b soltas)."""
+
+    def write(self, data: str) -> int:
+        sys.stdout.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        sys.stdout.flush()
+
+    def isatty(self) -> bool:
+        return sys.stdout.isatty()
+
+    def __getattr__(self, name):
+        return getattr(sys.stdout, name)
+
+
+_STYLE_TAG = re.compile(
+    r"\[/?(?:bold|dim|red|yellow|green|cyan|magenta|blue|white|bright_[a-z]+"
+    r"|underline|italic)\b[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def _plain(text: str) -> str:
+    """Remove tags de estilo rich ([red], [dim], ...) preservando marcadores de
+    conteúdo como [TOOL_CALL]/[USER], para que as linhas saiam legíveis mesmo sob
+    o patch_stdout (que não renderiza ANSI de outra thread)."""
+    return _STYLE_TAG.sub("", text)
+
+
+def approval_style() -> Style:
+    """Estilo do prompt de aprovações como objeto Style (str quebra no
+    prompt_toolkit 3.0.53: 'str' object has no attribute 'invalidation_hash')."""
+    return Style.from_dict({"": "bold yellow"})
 
 
 @dataclass
@@ -43,7 +85,7 @@ class Tui:
         self.project_root = project_root
         self.prompt_override = prompt_override  # callable(tool, params) -> "y"/"n"/"a" (testes)
 
-        self.console = Console()
+        self.console = Console(file=_LiveStdout(), highlight=False)
         self.events: queue.Queue[str] = queue.Queue()
         self._approvals: list[ApprovalRequest] = []
         self._approval_lock = threading.Lock()
@@ -51,7 +93,10 @@ class Tui:
 
     # -- eventos / aprovações ------------------------------------------------
     def event(self, text: str) -> None:
+        """Registra e imprime um evento. Chamável de outras threads: com
+        patch_stdout ativo, a linha aparece acima do prompt em tempo real."""
         self.events.put(text)
+        self.console.print(_plain(text))
 
     def ask_approval(self, tool: str, params: dict) -> str:
         """Bloqueante: registra uma aprovação pendente e aguarda a TUI responder."""
@@ -72,27 +117,28 @@ class Tui:
             self._approvals = []
         if not pending:
             return
-        ps = PromptSession(patch_stdout=True)
-        for req in pending:
-            try:
-                answer = ps.prompt(
-                    f"Permitir comando '[bold]{req.tool}[/bold]' da LLM? [y/n/a: permitir / negar / "
-                    f"permitir sempre na sessão] ",
-                    style="bold yellow",
-                )
-            except (KeyboardInterrupt, EOFError):
-                answer = "n"
-            req.finish(answer.strip().lower() or "n")
-            self.event(f"aprovação '{req.tool}': {answer or 'n'}")
+        ps = PromptSession()
+        with patch_stdout():
+            for req in pending:
+                try:
+                    answer = ps.prompt(
+                        f"Permitir comando '[bold]{req.tool}[/bold]' da LLM? [y/n/a: permitir / negar / "
+                        f"permitir sempre na sessão] ",
+                        style=approval_style(),
+                    )
+                except (KeyboardInterrupt, EOFError):
+                    answer = "n"
+                req.finish(answer.strip().lower() or "n")
+                self.event(f"aprovação '{req.tool}': {answer or 'n'}")
 
     # -- saída ---------------------------------------------------------------
     def _drain_events(self) -> None:
+        """Limpa a fila de eventos (já impressos por event()); evita backlog."""
         while True:
             try:
-                item = self.events.get_nowait()
+                self.events.get_nowait()
             except queue.Empty:
                 break
-            self.console.print(item)
 
     def _toolbar(self) -> str:
         listen = "ON" if self.listener is not None and self.listener.listening else "off"
@@ -110,11 +156,12 @@ class Tui:
                    f"new_chat={self.config.host.new_chat}")
         self.event("Comandos: /help · /init · /inject-environment · /listen · /status · /quit")
 
-        ps = PromptSession(patch_stdout=True)
+        ps = PromptSession()
 
         def _prompt() -> str:
             try:
-                return ps.prompt(HINT, completer=completer, bottom_toolbar=self._toolbar)
+                with patch_stdout():
+                    return ps.prompt(HINT, completer=completer, bottom_toolbar=self._toolbar)
             except KeyboardInterrupt:
                 return ""
             except EOFError:

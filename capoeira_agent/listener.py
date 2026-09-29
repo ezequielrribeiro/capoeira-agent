@@ -1,103 +1,116 @@
-"""Listener — loop de escuta (watch long-poll) + round-trip de tools via /api/chat."""
+"""Listener — recebe o push do host (via receiver) e faz o round-trip de tools via /api/chat."""
 from __future__ import annotations
 
 import threading
 
 from .executor import ToolResult
-from .llm_client import parse_delta_lines
+from .receiver import PushReceiver
 from .steps import Step, parse_tool_calls
 
 MAX_CONTEXT_MESSAGES = 60
+MAX_ROUNDS = 12
 
 
 class Listener:
-    def __init__(self, client, session, gate, executor, registry, *, watch_timeout=30,
-                 inject_environment=None, on_turn=None, new_chat=False) -> None:
+    def __init__(self, client, session, gate, executor, registry, *,
+                 app_host="127.0.0.1", app_port=8767, app_path="/api/capoeira/response",
+                 inject_environment=None, on_turn=None, on_event=None, new_chat=False) -> None:
         self.client = client
         self.session = session
         self.gate = gate
         self.executor = executor
         self.registry = registry
-        self.watch_timeout = watch_timeout
+        self.app_host = app_host
+        self.app_port = app_port
+        self.app_path = app_path
         self.inject_environment = inject_environment  # callable() -> str
         self.on_turn = on_turn  # callable(tool, params, result, allowed) p/ monitor/TUI
+        self.on_event = on_event  # callable(text) p/ feedback em tempo real na TUI
         self.new_chat = new_chat
 
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._receiver = PushReceiver(self.handle_response, host=app_host, port=app_port)
+        self._round_count = 0
         self.listen_messages: list[str] = []
         self._lock = threading.Lock()
 
     # -- controle ------------------------------------------------------------
     @property
     def listening(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return self._receiver.listening
 
     def start(self) -> str:
         if self.listening:
             return "listener já ativo"
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="capoeira-listener", daemon=True)
-        self._thread.start()
+        self._receiver.start()
+        self._emit(f"escuta iniciada (push em {self.app_host}:{self.app_port}{self.app_path})")
+        try:
+            self.client.register_app(self.app_port, host=self.app_host, name="capoeira-agent")
+            self._emit("aplicação registrada no host como destino do push")
+        except Exception as exc:
+            self._emit(f"[yellow]registro no host falhou (continua escutando): {exc}[/yellow]")
         return "escuta iniciada"
 
     def stop(self) -> str:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=self.watch_timeout + 5)
-            self._thread = None
+        try:
+            self.client.unregister_app()
+        except Exception:
+            pass
+        self._receiver.stop()
+        self._emit("escuta encerrada")
         return "escuta encerrada"
 
-    # -- loop ----------------------------------------------------------------
-    def _loop(self) -> None:
+    def _emit(self, text: str) -> None:
+        if self.on_event is not None:
+            self.on_event(text)
+
+    # -- processamento do push ----------------------------------------------
+    def handle_response(self, payload: dict) -> None:
+        """Chamado pelo receiver a cada push do host. Espelha o turno do
+        assistente e, se houver [TOOL_CALL], executa as tools e reenvia o
+        resultado ao modelo (fire-and-forget)."""
         try:
-            if self.inject_environment is not None:
-                self.inject_environment()
-            while not self._stop.is_set():
-                try:
-                    delta, new_revision = self.client.watch(self.session.revision, self.watch_timeout)
-                except Exception as exc:
-                    self.listen_messages.append(f"watch falhou: {exc}")
-                    if self._stop.wait(2):  # backoff curto
-                        break
-                    continue
-                if not delta:
-                    continue
-                self.session.revision = new_revision
-                self.session.save_state()
-                self._process_delta(delta, new_revision)
-        except Exception as exc:  # erro fatal no loop
-            self.listen_messages.append(f"listener encerrado por erro: {exc}")
-
-    # -- processamento -------------------------------------------------------
-    def _process_delta(self, delta: str, revision: int) -> None:
-        turns = parse_delta_lines(delta)
-        for role, content in turns:
-            self.session.append_message(role, content, revision=revision)
-        self.listen_messages.append(f"delta [{revision}]: {len(turns)} turno(s)")
-        # procura [TOOL_CALL] entre turnos de assistente
-        assistant_text = "\n".join(c for r, c in turns if r == "assistant")
-        if assistant_text and "[TOOL_CALL]" in assistant_text:
-            self._run_tool_round(assistant_text)
-
-    def _run_tool_round(self, assistant_text: str) -> None:
-        steps = parse_tool_calls(assistant_text)
-        if not steps:
-            return
-        # 'done' apenas encerra o turno — não é executado
-        steps = [s for s in steps if s.tool != "done"]
-        if not steps:
-            return
-        messages = self._tool_results_to_messages(steps)
-        if not messages:
-            return
-        self.listen_messages.append(f"tool-calls executados: {len(steps)}")
-        self._send_round(messages)
+            error = payload.get("error")
+            if error:
+                self._emit(f"[red]erro do modelo: {error}[/red]")
+                return
+            text = (payload.get("text") or "").strip()
+            if not text:
+                return
+            self._append_round_reply(text)
+            steps = [s for s in parse_tool_calls(text) if s.tool != "done"]
+            if not steps:
+                self._round_count = 0
+                return
+            if self._round_count >= MAX_ROUNDS:
+                self._emit("[red]limite de rounds de tool atingido — encerrando turno[/red]")
+                self._round_count = 0
+                return
+            self._round_count += 1
+            messages = self._tool_results_to_messages(steps)
+            if not messages:
+                return
+            self.listen_messages.append(f"tool-calls executados: {len(steps)}")
+            self._emit(f"executando {len(steps)} comando(s): {', '.join(s.tool for s in steps)}")
+            self.client.chat(messages, new_chat=self.new_chat)
+        except Exception as exc:
+            msg = f"processamento do push falhou: {exc}"
+            self.listen_messages.append(msg)
+            self._emit(f"[red]{msg}[/red]")
 
     def _tool_results_to_messages(self, steps: list[Step]) -> list[dict] | None:
+        """Converte steps executados em mensagens role=tool para o round-trip.
+        Comandos não reconhecidos são apenas exibidos na TUI — nunca reenviados
+        ao modelo (evita loop)."""
         messages_base = self.session.messages()
         tool_msgs: list[dict] = []
         for idx, step in enumerate(steps):
+            if step.tool == "done":
+                continue  # encerra o turno; não é executado nem reenviado
+            if not self.executor.known_tool(step.tool):
+                self._emit(f"[yellow]comando não reconhecido: '{step.tool}' — exibido na TUI, "
+                           f"sem reenvio ao modelo[/yellow]")
+                self.session.approval(step.tool, False)
+                continue
             allowed, result = self._run_step(step, idx)
             msg = {"role": "tool", "content": self._result_text(result)}
             if not allowed:
@@ -128,25 +141,16 @@ class Listener:
         self.session.approval(step.tool, allowed)
         if self.on_turn is not None:
             self.on_turn(step.tool, step.params, result, allowed)
+        if result.ok:
+            self._emit(f"ok: {step.tool}")
+        else:
+            self._emit(f"[red]falha: {step.tool}: {result.error or result.output}[/red]")
         return allowed, result
 
     def _result_text(self, result: ToolResult) -> str:
         if result.ok:
             return result.output
         return f"ERRO: {result.error or result.output}"
-
-    def _send_round(self, messages: list[dict]) -> None:
-        tools = self.registry.tool_definitions()
-        for _ in range(12):  # proteção contra loop infinito de tool calls
-            reply = self.client.chat(messages, tools=tools, new_chat=self.new_chat)
-            self._append_round_reply(reply.content)
-            steps = parse_tool_calls(reply.content)
-            if not steps:
-                break
-            more = self._tool_results_to_messages(steps)
-            if not more:
-                break
-            messages = (messages + more)[-MAX_CONTEXT_MESSAGES:]
 
     def _append_round_reply(self, content: str) -> None:
         if not content:

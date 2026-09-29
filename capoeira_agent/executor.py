@@ -53,6 +53,12 @@ class Executor:
                 return cmd_name
         return None
 
+    def known_tool(self, tool: str) -> bool:
+        """True se a tool tem executor local (core handler ou comando-plugin)."""
+        if hasattr(self, f"_do_{tool}"):
+            return True
+        return self._plugin_tool(tool) is not None
+
     # -- handlers ------------------------------------------------------------
     def _read_required(self, params: dict) -> str:
         path = params.get("path")

@@ -27,7 +27,6 @@ opções:
   --model M            perfil de provedor do CapoeiraHost
   --base-url URL       base URL do CapoeiraHost (padrão: http://127.0.0.1:8765)
   --timeout SEG        timeout por requisição
-  --watch-timeout SEG  timeout do long-poll /api/chat/watch
   --policy MODE        auto | ask | readonly
   --readonly           atalho para --policy readonly
   --new-chat VAL       true | false (padrão do agente: false)
@@ -41,7 +40,7 @@ def parse_args(argv: list[str]) -> dict:
     flags = {
         "--config": "config_dir", "--project": "project", "--session": "session",
         "--model": "model", "--base-url": "base_url", "--timeout": "timeout",
-        "--watch-timeout": "watch_timeout", "--policy": "policy", "--new-chat": "new_chat",
+        "--policy": "policy", "--new-chat": "new_chat",
     }
     while i < len(argv):
         arg = argv[i]
@@ -77,8 +76,6 @@ def bootstrap(opts: dict, *, prompt_override=None) -> Tui:
         config.host.base_url = opts["base_url"].rstrip("/")
     if opts.get("timeout"):
         config.host.timeout = int(opts["timeout"])
-    if opts.get("watch_timeout"):
-        config.host.watch_timeout = int(opts["watch_timeout"])
     if opts.get("new_chat"):
         config.host.new_chat = opts["new_chat"].lower() in ("true", "1")
     if opts.get("readonly"):
@@ -109,8 +106,11 @@ def bootstrap(opts: dict, *, prompt_override=None) -> Tui:
                                   new_chat=config.host.new_chat)
 
     listener = Listener(client, session, permissions, executor, registry,
-                        watch_timeout=config.host.watch_timeout,
+                        app_host=config.host.app_host,
+                        app_port=config.host.app_port,
+                        app_path=config.host.app_path,
                         inject_environment=_inject_if_needed,
+                        on_event=tui.event,
                         new_chat=config.host.new_chat)
 
     context = AgentContext(config, session, client, registry, permissions, tui, project_root)

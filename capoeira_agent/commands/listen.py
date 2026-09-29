@@ -3,7 +3,7 @@ from capoeira_agent.core.command import Command
 
 class ListenCommand(Command):
     name = "listen"
-    description = "Inicia (ou para, com 'stop') a escuta de comandos remotos via /api/chat/watch"
+    description = "Inicia (ou para, com 'stop') a escuta do push de respostas do host"
 
     def execute(self, args):
         listener = self.context.listener
