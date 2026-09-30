@@ -47,8 +47,8 @@ def _tool_results(fh):
     return out
 
 
-def _payload(text, error=None):
-    return {"request_id": "req-1", "model": "gemini-pro", "provider": "gemini",
+def _payload(text, error=None, request_id="req-1"):
+    return {"request_id": request_id, "model": "gemini-pro", "provider": "gemini",
             "endpoint": "chat", "stream": False, "text": text, "error": error}
 
 
@@ -134,3 +134,61 @@ def test_start_registers_and_stop_unregisters(fake_host, tmp_path):
     assert not listener.listening
     assert fh["ctrl"].unregister_requests == 1
     assert fh["ctrl"].app_port is None
+
+
+def test_roundtrip_sends_only_current_tool_result(fake_host, tmp_path):
+    """Não reinjetar histórico: o round-trip leva só o resultado do turno,
+    sem header do /inject-environment nem [TOOL_CALL] anteriores."""
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    listener = Listener(client, session, gate, executor, registry, new_chat=False)
+
+    session.append_message("system", "ENV_HEADER_XYZ [TOOL] name=read_file desc=le")
+    session.append_message("assistant", "[TOOL_CALL] list_dir | path='.'")
+
+    listener.handle_response(_payload("[TOOL_CALL] read_file | path='dados.txt'\n"))
+
+    results = _tool_results(fh)
+    assert len(results) == 1
+    content = results[0]["content"]
+    assert content.startswith("[TOOL_RESULT]")
+    assert "olá mundo" in content
+    assert "ENV_HEADER_XYZ" not in content
+    assert "[TOOL] " not in content
+    assert "list_dir" not in content
+    # o round-trip é um único turno (sem o transcript acumulado)
+    form = fh["ctrl"].chat_requests[0][1]
+    assert sum(1 for key, _ in form if key == "role") == 1
+
+
+def test_roundtrip_forces_new_chat_false_even_when_configured_true(fake_host, tmp_path):
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    listener = Listener(client, session, gate, executor, registry, new_chat=True)
+
+    listener.handle_response(_payload("[TOOL_CALL] read_file | path='dados.txt'\n"))
+
+    results = _tool_results(fh)
+    assert results
+    assert results[0]["new_chat"] == "false"
+
+
+def test_duplicate_request_id_not_executed_twice(fake_host, tmp_path):
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    listener = Listener(client, session, gate, executor, registry, new_chat=False)
+
+    listener.handle_response(_payload("[TOOL_CALL] read_file | path='dados.txt'\n", request_id="req-x"))
+    listener.handle_response(_payload("[TOOL_CALL] list_dir | path='.'\n", request_id="req-x"))
+
+    assert len(_tool_results(fh)) == 1
+
+
+def test_duplicate_tool_block_not_executed_twice(fake_host, tmp_path):
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    events: list[str] = []
+    listener = Listener(client, session, gate, executor, registry, on_event=events.append, new_chat=False)
+
+    payload = _payload("[TOOL_CALL] read_file | path='dados.txt'\n", request_id="req-1")
+    listener.handle_response(payload)
+    listener.handle_response(_payload("[TOOL_CALL] read_file | path='dados.txt'\n", request_id="req-2"))
+
+    assert len(_tool_results(fh)) == 1
+    assert any("anti-loop" in e for e in events)

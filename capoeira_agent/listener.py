@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from .executor import ToolResult
 from .receiver import PushReceiver
 from .steps import Step, parse_tool_calls
 
-MAX_CONTEXT_MESSAGES = 60
 MAX_ROUNDS = 12
+_SEEN_REQUEST_LIMIT = 64
+_DUPLICATE_WINDOW_S = 5.0
+_TURN_WINDOW_S = 30.0
+_SEEN_TURN_LIMIT = 128
 
 
 class Listener:
@@ -32,6 +36,11 @@ class Listener:
         self._round_count = 0
         self.listen_messages: list[str] = []
         self._lock = threading.Lock()
+        self._seen_request_ids: list[str] = []
+        self._last_signature: tuple[str, ...] | None = None
+        self._last_signature_at = 0.0
+        self._recent_turns: list[tuple[str, float]] = []
+        self._outstanding: list[str] = []
 
     # -- controle ------------------------------------------------------------
     @property
@@ -66,13 +75,22 @@ class Listener:
     # -- processamento do push ----------------------------------------------
     def handle_response(self, payload: dict) -> None:
         """Chamado pelo receiver a cada push do host. Espelha o turno do
-        assistente e, se houver [TOOL_CALL], executa as tools e reenvia o
-        resultado ao modelo (fire-and-forget)."""
+        assistente e, se houver [TOOL_CALL], executa as tools e reenvia APENAS
+        o resultado do turno ao modelo (fire-and-forget).
+
+        O histórico da sessão não é reenviado: com ``new_chat=false`` o chat web
+        já contém o ambiente/contrato e os ``[TOOL_CALL]`` anteriores — reenviá-los
+        faria o modelo reler os próprios comandos e entrar em loop."""
         try:
             error = payload.get("error")
             if error:
                 self._emit(f"[red]erro do modelo: {error}[/red]")
                 return
+            request_id = payload.get("request_id")
+            if request_id and not self._claim_request(str(request_id)):
+                self._emit(f"[dim]push ignorado (request_id já processado: {request_id})[/dim]")
+                return
+            solicited = bool(request_id) and self._take_outstanding(str(request_id))
             text = (payload.get("text") or "").strip()
             if not text:
                 return
@@ -81,27 +99,99 @@ class Listener:
             if not steps:
                 self._round_count = 0
                 return
+            if self._duplicate_block(steps) or self._duplicate_turn(text):
+                self._emit("[yellow]turno de [TOOL_CALL] idêntico a um já tratado — "
+                           "não reexecutando (proteção anti-loop)[/yellow]")
+                return
             if self._round_count >= MAX_ROUNDS:
                 self._emit("[red]limite de rounds de tool atingido — encerrando turno[/red]")
                 self._round_count = 0
                 return
             self._round_count += 1
+            origin = "" if solicited else "[dim](turno digitado na Web) [/dim]"
+            recognized = [s for s in steps if self.executor.known_tool(s.tool)]
+            if recognized:
+                self.listen_messages.append(f"tool-calls executados: {len(recognized)}")
+                self._emit(f"{origin}executando {len(recognized)} comando(s): "
+                           f"{', '.join(s.tool for s in recognized)}")
             messages = self._tool_results_to_messages(steps)
             if not messages:
                 return
-            self.listen_messages.append(f"tool-calls executados: {len(steps)}")
-            self._emit(f"executando {len(steps)} comando(s): {', '.join(s.tool for s in steps)}")
-            self.client.chat(messages, new_chat=self.new_chat)
+            reply = self.client.chat(messages, new_chat=False)
+            if reply.request_id:
+                self._track_request(reply.request_id)
         except Exception as exc:
             msg = f"processamento do push falhou: {exc}"
             self.listen_messages.append(msg)
             self._emit(f"[red]{msg}[/red]")
 
+    # -- proteção anti-loop --------------------------------------------------
+    def _claim_request(self, request_id: str) -> bool:
+        """True se o request_id ainda não foi processado (e o registra).
+
+        Evita tratar duas vezes o mesmo push (redelivery do host)."""
+        with self._lock:
+            if request_id in self._seen_request_ids:
+                return False
+            self._seen_request_ids.append(request_id)
+            if len(self._seen_request_ids) > _SEEN_REQUEST_LIMIT:
+                del self._seen_request_ids[:-_SEEN_REQUEST_LIMIT]
+            return True
+
+    def _duplicate_block(self, steps: list[Step]) -> bool:
+        """True se o bloco de [TOOL_CALL] é idêntico ao último detectado há
+        poucos segundos (eco do watcher sobre um turno já tratado)."""
+        now = time.monotonic()
+        signature = tuple(s.line for s in steps)
+        with self._lock:
+            duplicate = (
+                signature == self._last_signature
+                and (now - self._last_signature_at) <= _DUPLICATE_WINDOW_S
+            )
+            self._last_signature = signature
+            self._last_signature_at = now
+        return duplicate
+
+    def _duplicate_turn(self, text: str) -> bool:
+        """True se o texto do turno (normalizado) já foi tratado há pouco.
+
+        Pega o eco do watcher mesmo quando o bloco de ``[TOOL_CALL]`` vem com
+        entorno diferente (prosa, espaços) da resposta original."""
+        normalized = " ".join(text.split())
+        now = time.monotonic()
+        with self._lock:
+            self._recent_turns = [(t, ts) for (t, ts) in self._recent_turns
+                                  if now - ts <= _TURN_WINDOW_S]
+            if any(t == normalized for t, _ in self._recent_turns):
+                return True
+            self._recent_turns.append((normalized, now))
+            if len(self._recent_turns) > _SEEN_TURN_LIMIT:
+                del self._recent_turns[:-_SEEN_TURN_LIMIT]
+            return False
+
+    def _track_request(self, request_id: str) -> None:
+        """Registra o request_id de uma geração disparada pelo agente, para
+        distinguir respostas solicitadas de turnos espontâneos (watcher)."""
+        with self._lock:
+            self._outstanding.append(request_id)
+            if len(self._outstanding) > _SEEN_REQUEST_LIMIT:
+                del self._outstanding[:-_SEEN_REQUEST_LIMIT]
+
+    def _take_outstanding(self, request_id: str) -> bool:
+        """True (e remove) se o request_id é resposta de uma geração do agente."""
+        with self._lock:
+            if request_id in self._outstanding:
+                self._outstanding.remove(request_id)
+                return True
+            return False
+
     def _tool_results_to_messages(self, steps: list[Step]) -> list[dict] | None:
-        """Converte steps executados em mensagens role=tool para o round-trip.
+        """Converte os steps executados em mensagens role=tool do turno atual.
+
+        Retorna APENAS os resultados deste turno — nunca o histórico da sessão,
+        nunca o header do /inject-environment nem [TOOL_CALL] anteriores.
         Comandos não reconhecidos são apenas exibidos na TUI — nunca reenviados
         ao modelo (evita loop)."""
-        messages_base = self.session.messages()
         tool_msgs: list[dict] = []
         for idx, step in enumerate(steps):
             if step.tool == "done":
@@ -112,17 +202,13 @@ class Listener:
                 self.session.approval(step.tool, False)
                 continue
             allowed, result = self._run_step(step, idx)
-            msg = {"role": "tool", "content": self._result_text(result)}
+            msg = {"role": "tool", "content": self._result_text(result), "tool_call_id": f"call_{idx}"}
             if not allowed:
                 msg["content"] = f"[DENEGADO] comando '{step.tool}' negado pelo usuário"
-                msg["tool_call_id"] = f"call_{idx}"
-            else:
-                msg["tool_call_id"] = f"call_{idx}"
             tool_msgs.append(msg)
         if not tool_msgs:
             return None
-        messages = (messages_base + tool_msgs)[-MAX_CONTEXT_MESSAGES:]
-        return messages
+        return tool_msgs
 
     def _run_step(self, step: Step, idx: int) -> tuple[bool, ToolResult]:
         dec = self.gate.decide(step, self.registry)
