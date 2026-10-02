@@ -28,4 +28,5 @@ class InjectEnvironmentCommand(Command):
         n_tools = len(self.context.registry.tool_definitions())
         print(f"ambiente injetado no chat ativo (new_chat={self.context.config.host.new_chat}). "
               f"{n_tools} commandos expostos.")
-        print(f"host respondeu: {ack.strip()} — a resposta do modelo chegará via push.")
+        print(f"host respondeu: {ack.strip()} — copie a resposta da LLM no chat "
+              f"(Ctrl+C) e rode /listen para o agente executar os comandos.")

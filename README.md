@@ -9,8 +9,9 @@ locais quando necessário.
 - Comunicação: [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host)
   (**protocolo textual pass-through verbatim**; endpoint `/api/chat` — o host não processa
   mais `tools`/`role=tool`: o agente formata o contrato de ferramentas no texto do próprio
-  system e interpreta a resposta verbatim). A resposta do LLM é entregue ao agente via
-  **push** (`POST /api/capoeira/response` na API local do agente), sem polling.
+  system e interpreta a resposta verbatim). A comunicação com o host é **unidirecional**
+  (só injeção); o **retorno é obtido pelo agente via área de transferência**: o usuário copia
+  a resposta da LLM no chat web (Ctrl+C) e o agente detecta a mudança, faz o parse e executa.
 - Extensibilidade: [Cli-Crivonansky](https://github.com/ezequielrribeiro/cli-crivonansky)
   (plugins de comando descobertos dinamicamente)
 
@@ -18,15 +19,14 @@ Spec: [`specs/capoeira-agent-spec.md`](specs/capoeira-agent-spec.md)
 
 ## Como funciona
 
-1. Suba o CapoeiraHost (v2.1.0+) com a extensão carregada e uma aba autenticada do provedor aberta.
+1. Suba o CapoeiraHost com a extensão carregada e uma aba autenticada do provedor aberta.
 2. `capoeira-agent "<pasta raiz do projeto>"` abre a TUI de monitoramento.
 3. `/init` — cria os artefatos iniciais do projeto (specs/skills/commands com exemplos).
 4. `/inject-environment` — envia ao chat ativo o ambiente do projeto + o dicionário de
    comandos que a LLM pode invocar (`[TOOL_CALL]`).
-5. `/listen` — o agente sobe a API local (receiver) e registra-se no host como destino do
-   push: quando a LLM, respondendo normalmente no chat web, emitir um `[TOOL_CALL]`, o
-   agente recebe a resposta via push, pede aprovação (conforme a política) e executa
-   localmente, devolvendo o resultado ao chat.
+5. `/listen` — inicia o monitor de clipboard. Quando a LLM emitir um `[TOOL_CALL]`, copie a
+   resposta no chat web (Ctrl+C): o agente detecta a mudança no clipboard, pede aprovação
+   (conforme a política), executa localmente e devolve o resultado ao chat via `/api/chat`.
 
 ## Instalação
 
@@ -45,10 +45,10 @@ Veja `examples/config.yaml` e `examples/projects/sample.yaml`. Premissas por pro
 
 Variáveis de ambiente (overlay): `CAPOEIRA_AGENT_CONFIG_DIR`, `CAPOEIRA_AGENT_BASE_URL`,
 `CAPOEIRA_AGENT_MODEL`, `CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`,
-`CAPOEIRA_AGENT_APP_PORT`.
+`CAPOEIRA_AGENT_CLIPBOARD_POLL`.
 
-Portas: o CapoeiraHost expõe a API em `127.0.0.1:8765`; a API local do agente (receiver do
-push) escuta em `127.0.0.1:8767` (configurável via `app_host`/`app_port`/`app_path`).
+Porta: o CapoeiraHost expõe a API em `127.0.0.1:8765` (só injeção). O agente não sobe
+API local — o retorno vem da área de transferência (opção `clipboard_poll`, em segundos).
 
 ## Comandos da TUI
 
@@ -62,4 +62,5 @@ push) escuta em `127.0.0.1:8767` (configurável via `app_host`/`app_port`/`app_p
 .venv\Scripts\python -m pytest -q
 ```
 
-A suíte usa um fake CapoeiraHost (ThreadingHTTPServer) e não depende de navegador/serviços externos.
+A suíte usa um fake CapoeiraHost (ThreadingHTTPServer) e não depende de navegador/serviços
+externos; o clipboard é injetado via monkeypatch.

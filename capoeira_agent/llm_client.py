@@ -1,4 +1,8 @@
-"""Cliente HTTP textual para o CapoeiraHost (pass-through verbatim): /api/chat + registro de app."""
+"""Cliente HTTP textual para o CapoeiraHost (pass-through verbatim): /api/chat.
+
+Comunicação unidirecional com o host: ele apenas injeta texto no LLM web; o
+retorno é obtido pelo agente via clipboard (ver ``listener``/``clipboard``).
+"""
 from __future__ import annotations
 
 import urllib.error
@@ -56,8 +60,9 @@ class LLMClient:
         """Chama /api/chat (pass-through verbatim no host): sem campo `tools` e
         sem `role=tool`. Resultados de ferramenta (role=tool) são serializados
         como turno assistant com `[TOOL_RESULT] (id) conteúdo`. O host responde
-        com `accepted: {request_id}` e entrega o resultado via push — o agente
-        NÃO faz polling nem aguarda a resposta aqui."""
+        `accepted: {request_id}` (fire-and-forget) — a resposta do modelo NÃO
+        volta pelo host: o usuário copia o texto do chat web para o clipboard e
+        o agente o processa via listener."""
         pairs: list[tuple[str, str]] = [("model", self.model)]
         for msg in messages:
             role = msg.get("role", "user")
@@ -75,19 +80,6 @@ class LLMClient:
 
         body, _ = self._post("/api/chat", pairs)
         return ChatReply(content=body, request_id=_parse_request_id(body))
-
-    # -- registro da aplicação (destino do push) ----------------------------
-    def register_app(self, port: int, host: str = "127.0.0.1", name: str = "capoeira-agent") -> str:
-        """Registra esta aplicação como destino do push do host."""
-        body, _ = self._post(
-            "/api/app/register",
-            [("port", str(port)), ("host", host), ("name", name)],
-        )
-        return body
-
-    def unregister_app(self) -> str:
-        body, _ = self._post("/api/app/unregister")
-        return body
 
     # -- utilidades ----------------------------------------------------------
     def providers(self) -> list[str]:

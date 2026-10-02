@@ -31,7 +31,7 @@ def test_bootstrap_builds_runtime(tmp_path):
     tui = entry.bootstrap(opts, prompt_override=lambda t, p: "n")
     assert tui.config.host.model == "gemini-pro"
     assert tui.config.host.new_chat is False
-    assert tui.config.host.app_port == 8767
+    assert tui.config.host.clipboard_poll > 0
     assert tui.session.slug == "projeto"
     assert tui.listener is not None
     assert tui.registry.get("/help") is not None

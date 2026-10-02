@@ -106,9 +106,7 @@ def bootstrap(opts: dict, *, prompt_override=None) -> Tui:
                                   new_chat=config.host.new_chat)
 
     listener = Listener(client, session, permissions, executor, registry,
-                        app_host=config.host.app_host,
-                        app_port=config.host.app_port,
-                        app_path=config.host.app_path,
+                        poll_interval=config.host.clipboard_poll,
                         inject_environment=_inject_if_needed,
                         on_event=tui.event,
                         new_chat=config.host.new_chat)

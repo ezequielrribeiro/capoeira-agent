@@ -1,105 +1,114 @@
-"""Listener — recebe o push do host (via receiver) e faz o round-trip de tools via /api/chat."""
+"""Listener — monitora o clipboard e executa os [TOOL_CALL] vindos do chat web.
+
+Comunicação unidirecional: o CapoeiraHost é usado **apenas para injetar** texto
+no LLM web (``/inject-environment`` e o round-trip de resultados). O retorno não
+usa mais push/HTTP: o usuário copia a resposta do chat (Ctrl+C) para o clipboard
+e o agente detecta a mudança, faz o parse dos ``[TOOL_CALL]`` e executa.
+
+O host não registra aplicação e não há API local no agente (sem receiver).
+"""
 from __future__ import annotations
 
 import threading
 import time
 
+from .clipboard import read_clipboard
 from .executor import ToolResult
-from .receiver import PushReceiver
 from .steps import Step, parse_tool_calls
 
 MAX_ROUNDS = 12
-_SEEN_REQUEST_LIMIT = 64
-_DUPLICATE_WINDOW_S = 5.0
 _TURN_WINDOW_S = 30.0
 _SEEN_TURN_LIMIT = 128
 
 
 class Listener:
     def __init__(self, client, session, gate, executor, registry, *,
-                 app_host="127.0.0.1", app_port=8767, app_path="/api/capoeira/response",
-                 inject_environment=None, on_turn=None, on_event=None, new_chat=False) -> None:
+                 poll_interval: float = 0.5, inject_environment=None, on_turn=None,
+                 on_event=None, new_chat=False) -> None:
         self.client = client
         self.session = session
         self.gate = gate
         self.executor = executor
         self.registry = registry
-        self.app_host = app_host
-        self.app_port = app_port
-        self.app_path = app_path
+        self.poll_interval = poll_interval
         self.inject_environment = inject_environment  # callable() -> str
         self.on_turn = on_turn  # callable(tool, params, result, allowed) p/ monitor/TUI
         self.on_event = on_event  # callable(text) p/ feedback em tempo real na TUI
         self.new_chat = new_chat
 
-        self._receiver = PushReceiver(self.handle_response, host=app_host, port=app_port)
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
         self._round_count = 0
         self.listen_messages: list[str] = []
         self._lock = threading.Lock()
-        self._seen_request_ids: list[str] = []
-        self._last_signature: tuple[str, ...] | None = None
-        self._last_signature_at = 0.0
+        self._baseline: str | None = None
         self._recent_turns: list[tuple[str, float]] = []
-        self._outstanding: list[str] = []
 
     # -- controle ------------------------------------------------------------
     @property
     def listening(self) -> bool:
-        return self._receiver.listening
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> str:
         if self.listening:
-            return "listener já ativo"
-        self._receiver.start()
-        self._emit(f"escuta iniciada (push em {self.app_host}:{self.app_port}{self.app_path})")
-        try:
-            self.client.register_app(self.app_port, host=self.app_host, name="capoeira-agent")
-            self._emit("aplicação registrada no host como destino do push")
-        except Exception as exc:
-            self._emit(f"[yellow]registro no host falhou (continua escutando): {exc}[/yellow]")
-        return "escuta iniciada"
+            return "monitor já ativo"
+        self._baseline = self._current_clipboard()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._poll_loop, name="capoeira-clipboard", daemon=True)
+        self._thread.start()
+        self._emit(f"monitor de clipboard iniciado (intervalo {self.poll_interval:g}s)")
+        return "monitor iniciado"
 
     def stop(self) -> str:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5)
+        self._thread = None
+        self._emit("monitor de clipboard encerrado")
+        return "monitor encerrado"
+
+    # -- monitoramento -------------------------------------------------------
+    def _poll_loop(self) -> None:
+        while not self._stop.wait(self.poll_interval):
+            text = self._current_clipboard()
+            if text is None:
+                continue
+            if text == self._baseline:
+                continue
+            self._baseline = text
+            if not text.strip():
+                continue
+            self.handle_response(text)
+
+    @staticmethod
+    def _current_clipboard() -> str | None:
         try:
-            self.client.unregister_app()
+            return read_clipboard()
         except Exception:
-            pass
-        self._receiver.stop()
-        self._emit("escuta encerrada")
-        return "escuta encerrada"
+            return None
 
     def _emit(self, text: str) -> None:
         if self.on_event is not None:
             self.on_event(text)
 
-    # -- processamento do push ----------------------------------------------
-    def handle_response(self, payload: dict) -> None:
-        """Chamado pelo receiver a cada push do host. Espelha o turno do
-        assistente e, se houver [TOOL_CALL], executa as tools e reenvia APENAS
-        o resultado do turno ao modelo (fire-and-forget).
+    # -- processamento do clipboard -----------------------------------------
+    def handle_response(self, text: str) -> None:
+        """Processa um turno copiado do chat web. Espelha o texto e, se houver
+        [TOOL_CALL], executa as tools e envia APENAS o resultado do turno ao
+        modelo (round-trip via /api/chat, new_chat=False).
 
         O histórico da sessão não é reenviado: com ``new_chat=false`` o chat web
         já contém o ambiente/contrato e os ``[TOOL_CALL]`` anteriores — reenviá-los
         faria o modelo reler os próprios comandos e entrar em loop."""
         try:
-            error = payload.get("error")
-            if error:
-                self._emit(f"[red]erro do modelo: {error}[/red]")
-                return
-            request_id = payload.get("request_id")
-            if request_id and not self._claim_request(str(request_id)):
-                self._emit(f"[dim]push ignorado (request_id já processado: {request_id})[/dim]")
-                return
-            solicited = bool(request_id) and self._take_outstanding(str(request_id))
-            text = (payload.get("text") or "").strip()
+            text = (text or "").strip()
             if not text:
                 return
-            self._append_round_reply(text)
             steps = [s for s in parse_tool_calls(text) if s.tool != "done"]
             if not steps:
-                self._round_count = 0
                 return
-            if self._duplicate_block(steps) or self._duplicate_turn(text):
+            if self._duplicate_turn(text):
                 self._emit("[yellow]turno de [TOOL_CALL] idêntico a um já tratado — "
                            "não reexecutando (proteção anti-loop)[/yellow]")
                 return
@@ -108,55 +117,27 @@ class Listener:
                 self._round_count = 0
                 return
             self._round_count += 1
-            origin = "" if solicited else "[dim](turno digitado na Web) [/dim]"
+            self._append_round_reply(text)
             recognized = [s for s in steps if self.executor.known_tool(s.tool)]
             if recognized:
                 self.listen_messages.append(f"tool-calls executados: {len(recognized)}")
-                self._emit(f"{origin}executando {len(recognized)} comando(s): "
+                self._emit(f"executando {len(recognized)} comando(s): "
                            f"{', '.join(s.tool for s in recognized)}")
             messages = self._tool_results_to_messages(steps)
             if not messages:
                 return
-            reply = self.client.chat(messages, new_chat=False)
-            if reply.request_id:
-                self._track_request(reply.request_id)
+            self.client.chat(messages, new_chat=False)
         except Exception as exc:
-            msg = f"processamento do push falhou: {exc}"
+            msg = f"processamento do clipboard falhou: {exc}"
             self.listen_messages.append(msg)
             self._emit(f"[red]{msg}[/red]")
 
     # -- proteção anti-loop --------------------------------------------------
-    def _claim_request(self, request_id: str) -> bool:
-        """True se o request_id ainda não foi processado (e o registra).
-
-        Evita tratar duas vezes o mesmo push (redelivery do host)."""
-        with self._lock:
-            if request_id in self._seen_request_ids:
-                return False
-            self._seen_request_ids.append(request_id)
-            if len(self._seen_request_ids) > _SEEN_REQUEST_LIMIT:
-                del self._seen_request_ids[:-_SEEN_REQUEST_LIMIT]
-            return True
-
-    def _duplicate_block(self, steps: list[Step]) -> bool:
-        """True se o bloco de [TOOL_CALL] é idêntico ao último detectado há
-        poucos segundos (eco do watcher sobre um turno já tratado)."""
-        now = time.monotonic()
-        signature = tuple(s.line for s in steps)
-        with self._lock:
-            duplicate = (
-                signature == self._last_signature
-                and (now - self._last_signature_at) <= _DUPLICATE_WINDOW_S
-            )
-            self._last_signature = signature
-            self._last_signature_at = now
-        return duplicate
-
     def _duplicate_turn(self, text: str) -> bool:
         """True se o texto do turno (normalizado) já foi tratado há pouco.
 
-        Pega o eco do watcher mesmo quando o bloco de ``[TOOL_CALL]`` vem com
-        entorno diferente (prosa, espaços) da resposta original."""
+        Pega re-cópias do mesmo turno (o usuário copia de novo, o clipboard
+        recebe a resposta duas vezes) sem reexecutar o comando."""
         normalized = " ".join(text.split())
         now = time.monotonic()
         with self._lock:
@@ -167,22 +148,6 @@ class Listener:
             self._recent_turns.append((normalized, now))
             if len(self._recent_turns) > _SEEN_TURN_LIMIT:
                 del self._recent_turns[:-_SEEN_TURN_LIMIT]
-            return False
-
-    def _track_request(self, request_id: str) -> None:
-        """Registra o request_id de uma geração disparada pelo agente, para
-        distinguir respostas solicitadas de turnos espontâneos (watcher)."""
-        with self._lock:
-            self._outstanding.append(request_id)
-            if len(self._outstanding) > _SEEN_REQUEST_LIMIT:
-                del self._outstanding[:-_SEEN_REQUEST_LIMIT]
-
-    def _take_outstanding(self, request_id: str) -> bool:
-        """True (e remove) se o request_id é resposta de uma geração do agente."""
-        with self._lock:
-            if request_id in self._outstanding:
-                self._outstanding.remove(request_id)
-                return True
             return False
 
     def _tool_results_to_messages(self, steps: list[Step]) -> list[dict] | None:

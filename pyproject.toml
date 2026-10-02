@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "capoeira-agent"
 version = "0.1.0"
-description = "Agente local que executa comandos emitidos por LLM Web via CapoeiraHost (modo escuta)"
+description = "Agente local que executa comandos emitidos por LLM Web via CapoeiraHost (retorno via clipboard)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,8 +13,6 @@ dependencies = [
     "prompt_toolkit>=3.0",
     "rich>=13",
     "PyYAML>=6",
-    "fastapi>=0.110",
-    "uvicorn>=0.29",
 ]
 
 [project.optional-dependencies]

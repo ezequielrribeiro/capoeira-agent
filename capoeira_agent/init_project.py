@@ -44,7 +44,7 @@ Uso:
     capoeira-agent "."
     /init                  # (re)cria estes artefatos
     /inject-environment    # envia ambiente + dicionário de comandos ao chat ativo
-    /listen                # inicia a escuta (recebe [TOOL_CALL] do chat web)
+    /listen                # monitora o clipboard (copie a resposta da LLM com Ctrl+C)
 """
 
 

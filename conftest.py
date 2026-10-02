@@ -1,4 +1,4 @@
-"""Fake CapoeiraHost (ThreadingHTTPServer) para testes — protocolo textual + push."""
+"""Fake CapoeiraHost (ThreadingHTTPServer) para testes — protocolo textual de injeção."""
 from __future__ import annotations
 
 import urllib.parse
@@ -16,11 +16,6 @@ class HostControl:
 
     def reset(self) -> None:
         self.chat_requests: list[tuple[str, list[tuple[str, str]]]] = []
-        self.register_requests: list[dict] = []
-        self.unregister_requests = 0
-        self.app_port: int | None = None
-        self.app_host = "127.0.0.1"
-        self.app_name = ""
         self.fail_chat: str | None = None  # status code como str p/ 503 etc.
         self._request_counter = 0
 
@@ -53,17 +48,6 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             ctrl._request_counter += 1
             self._send(200, f"accepted: req-{ctrl._request_counter}")
-        elif self.path == "/api/app/register":
-            fields = dict(form)
-            ctrl.app_port = int(fields.get("port", "0"))
-            ctrl.app_host = fields.get("host", "127.0.0.1")
-            ctrl.app_name = fields.get("name", "")
-            ctrl.register_requests.append(dict(fields))
-            self._send(200, f"ok host={ctrl.app_host} port={ctrl.app_port}")
-        elif self.path == "/api/app/unregister":
-            ctrl.unregister_requests += 1
-            ctrl.app_port = None
-            self._send(200, "ok")
         elif self.path == "/api/tags":
             self._send(200, "gemini-pro | provider=gemini | streaming=false\n")
         elif self.path == "/api/ps":

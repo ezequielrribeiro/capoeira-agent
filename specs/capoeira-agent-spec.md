@@ -1,9 +1,9 @@
 # 📜 Software Specification — CapoeiraAgent
 
 **Projeto:** CapoeiraAgent
-**Versão:** `0.1.0` — Draft
+**Versão:** `0.1.3` — Draft
 **Status:** `Proposta para revisão`
-**Data:** 15 de Setembro de 2026
+**Data:** 1 de Outubro de 2026
 
 ---
 
@@ -37,7 +37,7 @@ comandos de projeto/plugins), caso necessário.
 | Base | Papel |
 |---|---|
 | **CapoeiraCode** | Arquitetura de agente, contrato de ferramentas ([TOOLS] textual), execução de tools (`read_file`, `list_dir`, `run_shell`, `run_python`, `write_file`, `ask_user`, `done`), aplicador atômico, armazenamento/artefatos, política de permissão. |
-| **CapoeiraHost (v2.1.0+)** | Único backend de comunicação; `/api/chat` (textual) responde `accepted: {request_id}` (fire-and-forget) e entrega a resposta do LLM via **push** (`POST /api/capoeira/response`) na aplicação registrada em `/api/app/register` — habilita o modo "na escuta" sem substituir a interface web. |
+| **CapoeiraHost (>= 2.3.0)** | Único backend de comunicação, usado de forma **unidirecional**: `/api/chat` (textual) injeta o texto no LLM web e devolve a resposta **sincronamente**. O agente não mantém API local nem registro — o **retorno** é lido pelo agente da **área de transferência** (o usuário copia a resposta do chat com Ctrl+C). |
 | **Cli-Crivonansky** | Framework CLI extensível: `core/command.py`, `registry`, `loader` (descoberta dinâmica de plugins via importlib), `context`, `parser`. |
 
 ### 1.3. Problema de Negócio
@@ -64,8 +64,8 @@ permissão do usuário.
 │                            CAPOEIRA AGENT (Python)                               │
 │                                                                                   │
 │  ┌──────────────┐    ┌───────────────────┐    ┌───────────────────────────────┐   │
-│  │ TUI          │    │ LISTENER          │    │ PERMISSION GATE               │   │
-│  │  · monitor   │◀──▶│  · receiver (push)│───▶│  · auto | ask | readonly      │   │
+│  │ TUI          │    │ MONITOR           │    │ PERMISSION GATE               │   │
+│  │  · monitor   │◀──▶│  · clipboard poll │───▶│  · auto | ask | readonly      │   │
 │  │  · aprovação │    │  · handle_response│    │  · y/n/a (sempre na sessão)   │   │
 │  │  · /comandos │    │  · round-trip     │    └──────────────┬────────────────┘   │
 │  │  · plugins   │    └─────────┬─────────┘                   │ aprovou?           │
@@ -77,24 +77,25 @@ permissão do usuário.
 │                                │                      + framework de comandos    │
 └────────────────────────────────┼──────────────────────────────────────────────────┘
                                  │ HTTP (form-urlencoded → text/plain)
-                                 │ 127.0.0.1:8765
+                                 │ 127.0.0.1:8765  (só injeção)
 ┌────────────────────────────────▼───────────────────────────────────────────────┐
-│                              CAPOEIRAHOST (v2.1.0+)                           │
-│      /api/chat · /api/app/register · /api/ps · /api/tags                       │
+│                              CAPOEIRAHOST (>= 2.3.0)                          │
+│      /api/chat (síncrono, devolve o texto do LLM) · /api/ps · /api/tags        │
 └────────────────────────────────┬───────────────────────────────────────────────┘
                                  │ WS 127.0.0.1:8766 (JSON, nosso)
 ┌────────────────────────────────▼───────────────────────────────────────────────┐
-│                    EXTENSÃO MV3 (watcher de DOM + bridge)                     │
-│        CHAT_UPDATE (delta) · READ_CHAT · SEND_PROMPT (sem eco do agente)      │
+│                       EXTENSÃO MV3 (bridge + adapters)                        │
+│                       SEND_PROMPT (DOM) · READ_CHAT                           │
 └────────────────────────────────┬───────────────────────────────────────────────┘
                                  │ DOM (texto puro)
 ┌────────────────────────────────▼───────────────────────────────────────────────┐
 │                       WEB LLM INTERFACE (aba autenticada)                     │
 │                usuário continua conversando NORMALMENTE aqui                  │
+└────────────────────────────────┬───────────────────────────────────────────────┘
+                                 │ Ctrl+C (usuário copia a resposta)
+┌────────────────────────────────▼───────────────────────────────────────────────┐
+│                 CLIPBOARD DO SO (monitorado pelo agente)                      │
 └────────────────────────────────────────────────────────────────────────────────┘
-
-O host entrega a resposta do LLM à API local do agente (receiver) via
-`POST http://127.0.0.1:8767/api/capoeira/response` (JSON) — porta distinta da API do host.
 ```
 
 **Estado:** proposta (draft). Nenhum módulo implementado ainda.
@@ -109,7 +110,7 @@ O host entrega a resposta do LLM à API local do agente (receiver) via
 | **Sessão do agente** | Contexto local por projeto (config + workspace + histórico). Persistente e retomável. |
 | **Turno** | Unidade de transcrição do chat: `[USER] ...` ou `[ASSISTANT] ...` (contrato textual do host). |
 | **Dicionário de comandos** | Contrato `tools` (textual) enviado ao host; define o que a LLM pode invocar. |
-| **Escuta (listening)** | API local do agente (receiver) na escuta do push do host, aguardando a resposta do LLM. |
+| **Escuta (listening)** | Monitor de **clipboard** do agente: detecta a cópia da resposta do LLM (Ctrl+C) e a processa. |
 | **Permission gate** | Política que decide se um comando remoto é executado, questionado ou negado. |
 | **Comando (tool)** | Operação executável localmente (core tool ou comando-plugin). Invocável pela LLM via `[TOOL_CALL]` e/ou via TUI (`/...`). |
 
@@ -118,10 +119,10 @@ O host entrega a resposta do LLM à API local do agente (receiver) via
 ## 4. Requisitos de Ambiente
 
 - Python **3.10+** (multiplataforma).
-- [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) **>= 2.1.0** rodando
+- [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host) **>= 2.3.0** rodando
   em loopback (API `127.0.0.1:8765`, WS `127.0.0.1:8766`) com a extensão carregada e uma
-  aba autenticada do provedor **aberta**. A API local do agente (receiver do push) escuta em
-  `127.0.0.1:8767` (porta distinta da API do host).
+  aba autenticada do provedor **aberta**. O agente **não** sobe API local: o retorno vem
+  da área de transferência do SO.
 - Chrome/Edge para a extensão MV3.
 - ⚠️ Respeitar o **disclaimer do CapoeiraHost**: ferramenta de baixo volume (fila FIFO, um
   turno por vez; risco de rate-limit). O agente deve ser **conservador no volume**.
@@ -133,15 +134,12 @@ O host entrega a resposta do LLM à API local do agente (receiver) via
 Protocolo único: **`application/x-www-form-urlencoded`** nas requisições e **`text/plain`**
 nas respostas. Sem JSON no fio (exceto `models.json` do host e o bridge WS host⇄extensão).
 
-> **Atualização pós-v2.1.0 (pass-through verbatim — host 21/09/2026):** o CapoeiraHost
-> **não processa mais tool calling**. `/api/chat` não aceita `tools` nem `role=tool`
-> (somente `user|assistant|system`; `role=tool` é descartado → se não sobrar mensagem,
-> `400`). O host devolve a resposta **verbatim** (sem extrair/limpar `[TOOL_CALL]`), o
-> system segue **sem tags próprias** e `options` é aceito, porém ignorado. Todo o contrato
-> de ferramentas (linhas `[TOOL] ...` + instrução `[TOOL_CALL] nome | chave=valor`) e a
-> devolução de resultados são responsabilidade **exclusiva do CapoeiraAgent**, embutidos
-> no texto das mensagens. `new_chat` default do host agora é `true`, mas o agente continua
-> mandando `new_chat=false` por requisição.
+> **Atualização host >= 2.3.0 (unidirecional + clipboard):** o host passou a ser
+> **só injeção**: `/api/chat` e `/api/generate` devolvem a resposta do LLM **síncronamente**
+> no corpo (`text/plain`) — não há mais push, `/api/app/*` nem watcher de `CHAT_UPDATE`.
+> O agente continua usando o host apenas para injetar (`/inject-environment` e round-trip);
+> o **retorno** é obtido do **clipboard** do SO (`clipboard.py` + `listener`): o usuário
+> copia a resposta do chat (Ctrl+C) e o agente detecta a mudança, faz o parse e executa.
 
 ### 5.1. `POST /api/chat` — conversa / round-trip de tools
 
@@ -150,7 +148,7 @@ Campos: `model`*, pares repetidos `role`/`content`, `stream`, `new_chat`, `optio
 - **`new_chat`** — default **`false`** no agente (configurável). Com `false`: a extensão
   injeta no chat aberto; o system do perfil só é emitido **na primeira interação da
   sessão**; nas iterações seguintes vai só o transcript (sem repetir o system) até um
-  `new_chat=true` reiniciar.
+  `new_chat=true` reiniciar. O **round-trip usa sempre `new_chat=false`** (continua o chat).
 - **Roles aceitos:** `user|assistant|system` (qualquer outro, inclusive `tool`, é
   descartado pelo host → `400` se não sobrar mensagem).
 - **Contrato de tools:** o agente embute o dicionário de comandos **no conteúdo da
@@ -159,25 +157,24 @@ Campos: `model`*, pares repetidos `role`/`content`, `stream`, `new_chat`, `optio
   `prompts.build_tools_block`). Não há campo `tools` no form.
 - **Round-trip:** o resultado de cada execução volta ao modelo como **turno `assistant`**
   com conteúdo `[TOOL_RESULT] (id) resultado` — `llm_client.chat` faz essa serialização
-  quando uma mensagem interna tem `role=tool`/`tool_call_id`.
-- Resposta: `text/plain` **verbatim** (prosa + linhas `[TOOL_CALL]` juntas, sem parse pelo
-  host); o agente extrai as chamadas com `parse_tool_calls`.
+  quando uma mensagem interna tem `role=tool`/`tool_call_id`. Envia-se **apenas o resultado
+  do turno**, nunca o histórico/header (evita que o modelo releia `[TOOL_CALL]` antigos).
+- Resposta: `text/plain`, devolvida **sincronamente** pelo host. Para o envio de injeção, o
+  ack `accepted: {request_id}` de versões anteriores deixou de existir; a leitura da resposta
+  do modelo passa a ser via **clipboard**.
 - **Valores** `[TOOL_CALL]`: números/booleans diretos; strings com espaço entre `'...'`;
   `|` fora de aspas separa argumentos; múltiplas linhas = chamadas paralelas.
 
-### 5.2. Push da resposta — `POST /api/capoeira/response` (host → agente)
+### 5.2. Retorno via clipboard (usuário → agente)
 
-O host entrega a resposta do LLM à aplicação registrada (a API local do agente) via
-`POST http://<host>:<port>/api/capoeira/response` com corpo **JSON** contendo `request_id`,
-`model`, `provider`, `endpoint` (`chat`/`generate`), `stream`, `text`, `timestamp` e, em
-falha de geração, `error`. O agente **não faz polling** — apenas registra-se e processa as
-respostas conforme chegam.
+O host **não entrega** a resposta: o usuário copia o texto do LLM no chat web (Ctrl+C) e o
+agente monitora a área de transferência do SO (`clipboard.py`, polling configurável via
+`host.clipboard_poll`). Ao detectar mudança, o texto é normalizado, os `[TOOL_CALL]` são
+extraídos (`parse_tool_calls`) e o turno é processado como em §6.
 
-- Registro: `POST /api/app/register` (form `port`/`host`/`name`) vincula o destino do push;
-  `POST /api/app/unregister` desfaz. Sem app registrada, o host tenta a porta padrão
-  (`8767`) em best-effort.
-- O agente sobe a API local (`receiver.py`, FastAPI/uvicorn) em `127.0.0.1:8767` e despacha
-  cada payload para `listener.handle_response`.
+- Sem API local no agente, sem registro no host, sem polling HTTP.
+- Turnos idênticos recentes são ignorados (proteção anti-loop) e há teto de rounds (§6.3).
+- Prosa sem `[TOOL_CALL]` é ignorada (a conversa continua na aba Web, visível ao usuário).
 
 ### 5.3. Conteúdo binário/arquivos — base64 estrito
 
@@ -189,25 +186,24 @@ instruindo o reenvio em uma única linha. (Contrato herdado do CapoeiraCode §5.
 
 ---
 
-## 6. Modo Escuta (Listener) — fluxo de funcionamento
+## 6. Monitor de Clipboard (Listener) — fluxo de funcionamento
 
 ### 6.1. Ciclo nominal
 
 1. **Preparação** — `capoeira-agent "<pasta raiz>"` abre a TUI; cria/recarrega a sessão do
-   projeto; resolve configuração (host, modelo, política). O listener está **parado** até
+   projeto; resolve configuração (host, modelo, política). O monitor está **parado** até
    iniciado (ver `/listen`).
-2. **Injeção de ambiente** — `/inject-environment` (ou primeiro `/listen` sem injetar) envia
-   `POST /api/chat` com `new_chat=false` + mensagem `role=system` contendo o perfil do
-   projeto e o **contrato completo de tools embutido no texto** (linhas `[TOOL] ...` +
-   instrução `[TOOL_CALL] nome | chave=valor` — `prompts.build_tools_block`). O host responde
-   `accepted: {request_id}` (fire-and-forget); a resposta do modelo chega via push. Como é a
-   **primeira interação da sessão**, o system do perfil é emitido na aba aberta. A partir
-   daí a LLM **conhece os comandos disponíveis**.
-3. **Escuta** — `/listen` sobe a API local (receiver) e registra o agente no host
-   (`/api/app/register`). A partir daí o agente **não faz polling**: cada resposta do LLM
-   chega via `POST /api/capoeira/response` e é processada por `listener.handle_response`.
-4. **Processamento do push** — o texto da resposta é espelhado no monitor; se contiver
-   `[TOOL_CALL] nome | chave=valor` (1+ linhas), os comandos são executados:
+2. **Injeção de ambiente** — `/inject-environment` envia `POST /api/chat` com
+   `new_chat=false` + mensagem `role=system` contendo o perfil do projeto e o **contrato
+   completo de tools embutido no texto** (linhas `[TOOL] ...` + instrução
+   `[TOOL_CALL] nome | chave=valor` — `prompts.build_tools_block`). Como é a **primeira
+   interação da sessão**, o system do perfil é emitido na aba aberta. A partir daí a LLM
+   **conhece os comandos disponíveis**.
+3. **Monitor** — `/listen` inicia a thread de polling do **clipboard** (`clipboard.py`,
+   intervalo `host.clipboard_poll`). Não há API local nem polling HTTP: o retorno vem da
+   área de transferência.
+4. **Processamento da mudança** — ao detectar mudança no clipboard, o texto é normalizado;
+   se contiver `[TOOL_CALL] nome | chave=valor` (1+ linhas), os comandos são executados:
    - **Sem** `[TOOL_CALL]` ⇒ turno de prosa (a LLM respondeu normalmente); nada a executar.
    - **Com** `[TOOL_CALL]` ⇒ comandos a executar.
 5. **Permission gate** — para cada chamada: leitura automática; escrita/execução conforme
@@ -217,26 +213,26 @@ instruindo o reenvio em uma única linha. (Contrato herdado do CapoeiraCode §5.
    aplica `write_file` via applier atômico (RNF-04), executa comandos-plugin.
 7. **Round-trip** — o host é pass-through e não aceita `role=tool`; portanto o resultado é
    serializado **no texto do próprio transcript** como turno `assistant` com
-   `[TOOL_RESULT] (call_N) ...` via `POST /api/chat` (`new_chat=false`; fire-and-forget). A
-   próxima resposta do modelo chega por um novo push; o ciclo se repete até a resposta ser
-   **prosa final** (sem `[TOOL_CALL]`), com proteção de limite de rounds. A resposta final da
-   LLM já aparece na aba, visível ao usuário.
+   `[TOOL_RESULT] (call_N) ...` via `POST /api/chat` (`new_chat=false`). **Envia-se apenas o
+   resultado do turno**, nunca o histórico/header (evita loop). A resposta seguinte aparece na
+   aba Web; o usuário copia de novo e o ciclo se repete até a resposta ser **prosa final**
+   (sem `[TOOL_CALL]`), com proteção de limite de rounds.
 
 ### 6.2. Controle
 
 | Ação | Descrição |
 |---|---|
-| `/listen` | sobe a API local (receiver) e registra o agente no host como destino do push. Se for a primeira interação da sessão e ainda não houve injeção, injeta ambiente automaticamente. |
-| `/listen stop` | desregistra o agente do host e derruba a API local. |
-| `Ctrl+C` | interrompe o round-trip em andamento (também sai de aprovação pendente). |
+| `/listen` | inicia o monitor de clipboard. Se ainda não houve injeção, recomenda `/inject-environment` antes. |
+| `/listen stop` | encerra o monitor de clipboard. |
+| `Ctrl+C` (no chat web) | copia a resposta da LLM — é o gatilho do processamento. |
 
 ### 6.3. Robustez
 
-- O agente **não faz polling**: respostas chegam via push; falha de entrega do host é
-  best-effort (logada e ignorada pelo host, sem retry).
+- O agente **não faz polling HTTP**: o retorno vem do clipboard; uso de rede só na injeção.
 - Falha de transiente (`503` offline) na injeção/round-trip ⇒ log + retomada; não desliga o
-  listener.
-- Proteção contra loop de tool calls: limite de rounds consecutivos (máx. 12).
+  monitor.
+- Proteção contra loop/reexecução: turnos idênticos recentes são ignorados (janela de 30s) e
+  há limite de rounds consecutivos (máx. 12).
 
 ---
 
@@ -347,9 +343,9 @@ aprovações pendentes, histórico de comandos executados/negados compatível co
 |---|---|
 | `/help` | ajuda |
 | `/init` | cria os **artefatos iniciais do projeto** (árvore de arquivos; pastas `specs/` e `skills/` com exemplos; pasta de comandos-plugin com exemplo; `README` de uso). **Local a validar** (§11.2). |
-| `/inject-environment` | envia ao chat ativo o prompt com o ambiente do projeto + **dicionário de comandos** (`tools`), via `POST /api/chat` (`new_chat=false`, 1ª interação ⇒ headers `[TOOLS]`). Idempotente; re-emite (a pedido) para atualizar o dicionário. |
-| `/listen` · `/listen stop` | sobe/derruba a API local (receiver) e registra/desregistra o agente no host (push). |
-| `/status` | provider/modelo online, sessão, política, fila, estado do receiver. |
+| `/inject-environment` | envia ao chat ativo o prompt com o ambiente do projeto + **dicionário de comandos** (`tools`), via `POST /api/chat` (`new_chat=false`). O host injeta e devolve a resposta sincronamente (descartada); o retorno útil vem pelo clipboard. Idempotente; re-emite (a pedido) para atualizar o dicionário. |
+| `/listen` · `/listen stop` | inicia/encerra o **monitor de clipboard** (gatilho do processamento é o Ctrl+C no chat). |
+| `/status` | provider/modelo online, sessão, política, estado do monitor (poll do clipboard). |
 | `/permissions [auto|ask|readonly]` | ver/trocar política. |
 | `/model M` · `/base-url URL` · `/timeout SEG` | parâmetros de comunicação (estilo CapoeiraCode). |
 | `/new-chat [true|false]` | alternar reuso do chat na aba. |
@@ -372,7 +368,7 @@ Resolução: `CAPOEIRA_AGENT_CONFIG_DIR` → `%APPDATA%\CapoeiraAgent` → `~/.c
 
 ```
 CapoeiraAgent/
-├── config.yaml               # host, modelo, política, new_chat, app_host/app_port/app_path, python
+├── config.yaml               # host, modelo, política, new_chat, clipboard_poll, python
 ├── projects/*.yaml           # premissas por projeto (estilo CapoeiraCode: name, desc, stack, comandos-plugin selecionados)
 ├── commands/                 # plugins compartilhados (opcional)
 ├── specs/ · skills/ · prompts/  # instruções por projeto (carregadas na injeção de ambiente)
@@ -414,9 +410,7 @@ host:
   model: gemini-pro
   timeout: 180
   new_chat: false          # default do agente
-  app_host: 127.0.0.1      # API local do agente (receiver do push) — porta distinta do host
-  app_port: 8767
-  app_path: /api/capoeira/response
+  clipboard_poll: 0.5      # intervalo (s) de polling da área de transferência
 policy:
   mode: ask                # auto | ask | readonly
   auto_plugins: []         # nomes de comandos sempre autorizados (modo ask)
@@ -428,7 +422,7 @@ projects:
 ### 12.2. Env (overlay)
 
 `CAPOEIRA_AGENT_CONFIG_DIR`, `CAPOEIRA_AGENT_BASE_URL`, `CAPOEIRA_AGENT_MODEL`,
-`CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`, `CAPOEIRA_AGENT_APP_PORT`.
+`CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`, `CAPOEIRA_AGENT_CLIPBOARD_POLL`.
 
 ### 12.3. Por projeto
 
@@ -452,10 +446,10 @@ python -m venv .venv
 ### 13.2. Reconhecimento
 
 Python CLI + `Path`/`os` (`C:\...` vs `/...`); subprocess sem shell onde possível; nenhuma
-dependência nativa compilada (apenas stdlib + `prompt_toolkit` + `rich` + `PyYAML` +
-`fastapi` + `uvicorn`). A API local do agente (`receiver.py`) usa FastAPI/uvicorn — Python
-puro, **independente de sistema operacional** — e escuta em `127.0.0.1:8767`, porta distinta
-da API do host (`8765`).
+dependência nativa compilada (apenas stdlib + `prompt_toolkit` + `rich` + `PyYAML`). A leitura
+da área de transferência é feita por plataforma em `clipboard.py` (Windows via Win32/ctypes
+com fallback PowerShell; macOS via `pbpaste`; Linux via `wl-paste`/`xclip`/`xsel`) — **sem
+dependências externas**.
 
 ---
 
@@ -466,7 +460,8 @@ da API do host (`8765`).
 - **RNF-04 (Atomicidade):** `write_file` e lotes multi-arquivo aplicados via
   tmp + `os.replace` all-or-nothing (herdado do CapoeiraCode); sem escrita parcial.
 - **RNF-05 (Não-interferência):** o agente nunca dispara geração por conta própria; só reage
-  a respostas **externas** (push) — a interface web continua sendo a experiência primária.
+  a comandos **copiados pelo usuário** (clipboard) — a interface web continua sendo a
+  experiência primária.
 - **RNF-06 (Volume conservador):** 1 requisição em andamento por vez; respeito à fila FIFO e
   ao disclaimer do host.
 - **RNF-07 (Auditoria):** toda execução remota registrada no `session.jsonl` (comando, veredito,
@@ -483,12 +478,12 @@ capoeira-agent/
 ├── capoeira_agent/
 │   ├── __init__.py
 │   ├── entry.py             # `capoeira-agent [PATH] [flags]` → TUI (única interface)
-│   ├── llm_client.py        # /api/chat (urllib; text) + /api/app/register|unregister
+│   ├── llm_client.py        # /api/chat (urllib; text) — só injeção
 │   ├── prompts.py           # contrato TOOLS_CONTRACT; builder do /inject-environment
 │   ├── config.py            # resolve config dir; config.yaml + env overlay; premises
 │   ├── session.py           # configs/<slug>/ + session.jsonl
-│   ├── receiver.py          # API local (FastAPI/uvicorn) na escuta do push do host
-│   ├── listener.py          # handle_response (push) + round-trip de tools
+│   ├── clipboard.py         # leitura da área de transferência do SO (multiplataforma)
+│   ├── listener.py          # monitor de clipboard + round-trip de tools
 │   ├── permissions.py       # PermissionGate (auto/ask/readonly; y/n/a na sessão)
 │   ├── executor.py          # apply_step: read/list/run_shell/run_python/write_file/ask_user
 │   ├── applier.py           # aplicador atômico multi-arquivo (write_file)
@@ -506,7 +501,7 @@ capoeira-agent/
 │   └── tui/
 │       ├── app.py           # prompt_toolkit + rich; monitor + input de comandos
 │       └── monitor.py       # painel de estado/eventos/aprovações
-├── tests/                   # pytest (client fake do host; receiver; policies; tools)
+├── tests/                   # pytest (client fake do host; clipboard monkeypatch; policies; tools)
 ├── examples/                # config.yaml template + projects/<slug>.yaml
 ├── pyproject.toml           # entry `capoeira-agent` (pip install -e .)
 ├── requirements.txt · requirements-dev.txt
@@ -521,19 +516,20 @@ capoeira-agent/
 
 ```python
 # llm_client.py
-class ChatReply: content: str  # "accepted: {request_id}" (fire-and-forget)
+class ChatReply: content: str  # resposta do host (síncrona)
 class LLMClient(base_url, model, timeout):
     chat(messages, stream=False, new_chat=False) -> ChatReply
-    register_app(port, host, name) -> str
-    unregister_app() -> str
 class LLMRequestError(Exception)
 serialize_tools(tools: list[dict]) -> str
+
+# clipboard.py
+def read_clipboard() -> str | None
 
 # listener.py
 class Listener(client, session, permissions, tui):
     start() / stop()
     @property listening: bool
-    handle_response(payload: dict) -> None   # parse [TOOL_CALL] → gate → exec → round-trip
+    handle_response(text: str) -> None       # parse [TOOL_CALL] → gate → exec → round-trip
 
 # permissions.py
 class PermissionGate(mode):
@@ -558,9 +554,9 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 
 | Iteração | Entrega |
 |---|---|
-| **I1 — Esqueleto e host** | entry + TUI mínima + `config.py` + `llm_client` (`/api/chat` + registro de app) + teste com host fake. |
+| **I1 — Esqueleto e host** | entry + TUI mínima + `config.py` + `llm_client` (`/api/chat`, só injeção) + teste com host fake. |
 | **I2 — Framework de comandos** | `core/*` (Crivonansky) + `commands/` core + `/init` + `/generate-plugin`. |
-| **I3 — Listener + permissions** | receiver (push) + `handle_response`, permission gate (auto/ask/readonly, y/n/a), executor core + applier atômico. |
+| **I3 — Monitor + permissions** | clipboard (`clipboard.py`) + `handle_response`, permission gate (auto/ask/readonly, y/n/a), executor core + applier atômico. |
 | **I4 — Injeção e round-trip** | `/inject-environment` (dicionário), base64 estrito, round-trip `role=tool`. |
 | **I5 — Sessões e monitor** | `session.jsonl`, multi-sessões, painel de monitor. |
 | **I6 — Premises/artefatos** | `projects/<slug>.yaml`, specs/skills/prompts, árvore do `/init` customizável. |
@@ -574,10 +570,10 @@ def inject_environment(client, session, registry, new_chat=False) -> None
    workspace no config).
 2. **Base de tools** — manutenção dos 7 tools do CapoeiraCode como core (sugerido) vs
    conjunto enxuto próprio.
-3. **`/listen` público** (comando da TUI inicia a escuta) vs escuta automática ao abrir.
+3. **`/listen` público** (comando da TUI inicia o monitor de clipboard) vs monitor automático ao abrir.
 4. **Hierarquia de plugins** — projeto → config → package (ordem de precedência).
 5. **Política default** — `ask` para escrita/execução (sugerido), leitura automática.
-6. **Versionamento mínimo** do CapoeiraHost: `>= 2.1.0` (por push `/api/capoeira/response`).
+6. **Versionamento mínimo** do CapoeiraHost: `>= 2.3.0` (modo síncrono e unidirecional).
 
 ---
 
@@ -588,3 +584,4 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 | `0.1.0` | 15/09/2026 | Draft inicial da spec baseado em CapoeiraCode v6.0.0, CapoeiraHost **v2.1.0** (novos `/api/chat/read` e `/api/chat/watch` para o modo escuta) e Cli-Crivonansky (framework de plugins). |
 | `0.1.1` | 21/09/2026 | Adequação ao CapoeiraHost **pass-through verbatim** (commit `d1d00ab`): sem `tools`/`role=tool`/`tool_call_id` na API; contrato de tools embutido no texto da mensagem de sistema (`prompts.build_tools_block`); round-trip de resultados via turno `assistant` com `[TOOL_RESULT] (id) ...` (`llm_client.chat`). |
 | `0.1.2` | 28/09/2026 | Adequação ao CapoeiraHost **push** (commit `fb55cbb`): `/api/chat` responde `accepted: {request_id}` (fire-and-forget) e entrega a resposta via `POST /api/capoeira/response` na app registrada em `/api/app/register`. O agente sobe a API local (`receiver.py`, FastAPI/uvicorn) e processa respostas via `listener.handle_response` — sem polling (`/api/chat/read`/`watch` removidos). Removido o `Dockerfile`; a API do agente escuta em `127.0.0.1:8767`, porta distinta da API do host. |
+| `0.1.3` | 01/10/2026 | Comunicação **unidirecional**: o CapoeiraHost passa a ser só injeção (modo **síncrono**, v2.3.0) e o **retorno é lido da área de transferência** (`clipboard.py` + monitor em `listener`). Removidos o receiver FastAPI/uvicorn do agente, o registro de app e o polling HTTP; o host removeu push, `/api/app/*` e watcher. Round-trip envia apenas o resultado do turno (`new_chat=false`) e há proteções anti-loop. |

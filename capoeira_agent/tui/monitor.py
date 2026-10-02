@@ -18,9 +18,9 @@ def status_block(config, session, registry, permissions, client, listener=None) 
     sl = []
     sl.append(f"host: {config.host.base_url}")
     sl.append(f"modelo: {config.host.model} (provider online: {len(providers)})")
-    sl.append(f"new_chat: {config.host.new_chat} · push: {config.host.app_host}:{config.host.app_port}{config.host.app_path}")
+    sl.append(f"new_chat: {config.host.new_chat} · clipboard: poll {config.host.clipboard_poll:g}s")
     sl.append(f"política: {permissions.mode} · sessão: {session.session_name}")
-    sl.append(f"escuta: {'ativa' if listen else 'parada'} · revision: {session.revision}")
+    sl.append(f"monitor de clipboard: {'ativo' if listen else 'parado'} · revision: {session.revision}")
     if listener is not None and listener.listen_messages:
         for msg in listener.listen_messages[-5:]:
             sl.append(f"  {msg}")
