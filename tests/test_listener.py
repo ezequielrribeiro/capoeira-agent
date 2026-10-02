@@ -177,3 +177,41 @@ def test_clipboard_change_is_processed(fake_host, tmp_path, monkeypatch):
     listener.stop()
 
     assert _tool_results(fh), "mudança de clipboard deveria disparar a execução"
+
+
+def test_poll_loop_survives_clipboard_error(fake_host, tmp_path, monkeypatch):
+    """Uma falha de leitura do clipboard não pode derrubar a thread/monitor."""
+    import capoeira_agent.listener as listener_mod
+
+    fh, session, registry, client, gate, executor = _runtime(fake_host, tmp_path)
+    events: list[str] = []
+    listener = Listener(client, session, gate, executor, registry, poll_interval=0.05,
+                        on_event=events.append, new_chat=False)
+
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("clipboard indisponível")
+        return "[TOOL_CALL] read_file | path='dados.txt'\n"
+
+    monkeypatch.setattr(listener_mod, "read_clipboard", _flaky)
+
+    listener.start()
+    deadline = __import__("time").monotonic() + 3.0
+    while __import__("time").monotonic() < deadline and not _tool_results(fh):
+        __import__("time").sleep(0.02)
+    alive = listener.listening
+    listener.stop()
+
+    assert alive, "a thread do monitor morreu após erro de clipboard"
+    assert _tool_results(fh), "o monitor deveria se recuperar e processar depois do erro"
+
+
+def test_read_clipboard_never_raises():
+    """read_clipboard não pode lançar (e muito menos derrubar o processo)."""
+    from capoeira_agent.clipboard import read_clipboard
+
+    value = read_clipboard()
+    assert value is None or isinstance(value, str)

@@ -30,30 +30,55 @@ def _read_windows() -> str | None:
 
 
 def _read_windows_ctypes() -> str | None:
+    """Lê CF_UNICODETEXT com assinaturas explícitas.
+
+    Em 64 bits, sem ``restype``/``argtypes`` os handles são truncados para 32
+    bits, o que corrompe o ponteiro e derruba o processo com access violation
+    (0xC0000005). Por isso as funções do Win32 são declaradas explicitamente."""
     import ctypes
+    from ctypes import wintypes
+
+    CF_UNICODETEXT = 13
 
     try:
-        user32 = ctypes.windll.user32
-        CF_UNICODETEXT = 13
-        if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+        user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+        user32.GetClipboardData.argtypes = [wintypes.UINT]
+        user32.GetClipboardData.restype = wintypes.HANDLE
+
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+    except (AttributeError, OSError):
+        return None
+
+    if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+        return None
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
             return None
-        if not user32.OpenClipboard(0):
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
             return None
         try:
-            handle = user32.GetClipboardData(CF_UNICODETEXT)
-            if not handle:
-                return None
-            pointer = ctypes.windll.kernel32.GlobalLock(handle)
-            if not pointer:
-                return None
-            try:
-                return ctypes.c_wchar_p(pointer).value or ""
-            finally:
-                ctypes.windll.kernel32.GlobalUnlock(handle)
+            return ctypes.wstring_at(pointer)
         finally:
-            user32.CloseClipboard()
-    except Exception:
+            kernel32.GlobalUnlock(handle)
+    except OSError:
         return None
+    finally:
+        user32.CloseClipboard()
 
 
 def _read_linux() -> str | None:

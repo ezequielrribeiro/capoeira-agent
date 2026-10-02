@@ -71,15 +71,18 @@ class Listener:
     # -- monitoramento -------------------------------------------------------
     def _poll_loop(self) -> None:
         while not self._stop.wait(self.poll_interval):
-            text = self._current_clipboard()
-            if text is None:
-                continue
-            if text == self._baseline:
-                continue
-            self._baseline = text
-            if not text.strip():
-                continue
-            self.handle_response(text)
+            try:
+                text = self._current_clipboard()
+                if text is None:
+                    continue
+                if text == self._baseline:
+                    continue
+                self._baseline = text
+                if not text.strip():
+                    continue
+                self.handle_response(text)
+            except Exception as exc:  # noqa: BLE001 - thread nunca deve morrer silenciosamente
+                self._emit(f"[red]falha ao ler o clipboard: {exc}[/red]")
 
     @staticmethod
     def _current_clipboard() -> str | None:
