@@ -12,9 +12,14 @@ class ListenCommand(Command):
             return
         if args and args[0] == "stop":
             print(listener.stop())
-        elif args:
-            print("uso: /listen [stop]")
-        else:
-            if not self.context.session.injected:
-                print("ambiente ainda não injetado — executando /inject-environment antes do monitor...")
-            print(listener.start())
+            return
+        if args and args[0] == "debug":
+            listener.debug = not listener.debug
+            print(f"debug do monitor: {'on' if listener.debug else 'off'}")
+            return
+        if args:
+            print("uso: /listen [stop|debug]")
+            return
+        if not self.context.session.injected:
+            print("ambiente ainda não injetado — rode /inject-environment para expor os comandos.")
+        print(listener.start())

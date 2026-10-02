@@ -24,7 +24,7 @@ _SEEN_TURN_LIMIT = 128
 class Listener:
     def __init__(self, client, session, gate, executor, registry, *,
                  poll_interval: float = 0.5, inject_environment=None, on_turn=None,
-                 on_event=None, new_chat=False) -> None:
+                 on_event=None, new_chat=False, debug: bool = False) -> None:
         self.client = client
         self.session = session
         self.gate = gate
@@ -35,7 +35,7 @@ class Listener:
         self.on_turn = on_turn  # callable(tool, params, result, allowed) p/ monitor/TUI
         self.on_event = on_event  # callable(text) p/ feedback em tempo real na TUI
         self.new_chat = new_chat
-
+        self.debug = debug
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._round_count = 0
@@ -80,6 +80,9 @@ class Listener:
                 self._baseline = text
                 if not text.strip():
                     continue
+                if self.debug:
+                    preview = text.strip().replace("\n", " ")[:120]
+                    self._emit(f"[dim]clipboard mudou: {preview!r}[/dim]")
                 self.handle_response(text)
             except Exception as exc:  # noqa: BLE001 - thread nunca deve morrer silenciosamente
                 self._emit(f"[red]falha ao ler o clipboard: {exc}[/red]")

@@ -30,6 +30,28 @@ def test_parse_tool_calls_prose_only():
     assert parse_tool_calls("") == []
 
 
+def test_parse_tool_calls_tolerates_web_markup():
+    """O chat web pode renderizar o contrato como lista/citação/negrito ou com
+    caracteres invisíveis do DOM — o comando deve continuar sendo detectado."""
+    cases = [
+        "\u00a0[TOOL_CALL] list_dir | path='.'",
+        "- [TOOL_CALL] list_dir | path='.'",
+        "> [TOOL_CALL] list_dir | path='.'",
+        "1. [TOOL_CALL] list_dir | path='.'",
+        "**[TOOL_CALL] list_dir | path='.'**",
+        "```\n[TOOL_CALL] list_dir | path='.'\n```",
+        "\t[TOOL_CALL] list_dir | path='.'",
+        "[\u200bTOOL_CALL] list_dir | path='.'",
+        "[TOOL_CALL] list_dir | path='.'\u00a0",
+        "Vou executar:\n[TOOL_CALL] list_dir | path='.'",
+    ]
+    for case in cases:
+        steps = parse_tool_calls(case)
+        assert len(steps) == 1, f"falhou para {case!r}"
+        assert steps[0].tool == "list_dir"
+        assert steps[0].params["path"] == "."
+
+
 def test_parse_tool_calls_truncated_is_skipped():
     # aspas simples não fechadas => linha cortada => não executar
     content = "[TOOL_CALL] write_file | code_content='PD9waHAK"

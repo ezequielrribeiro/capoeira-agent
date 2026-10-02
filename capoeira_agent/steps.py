@@ -6,7 +6,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-TOOL_CALL_LINE = re.compile(r"^\s*\[TOOL_CALL\]\s+(.{1,512})\s*$", re.MULTILINE)
+# Tolerância a marcação que o chat web costuma acrescentar ao redor do contrato
+# (negrito, listas, citação, bloco de código) e a caracteres invisíveis do DOM
+# (non-breaking space, zero-width). O comando pode não estar no início da linha.
+TOOL_CALL_ANYWHERE = re.compile(
+    r"(?:\*\*|__|`+)?\s*\[[\u200b\ufeff]?TOOL_CALL\]\s+(.{1,512}?)(?:\*\*|__|`+)?\s*$",
+    re.MULTILINE,
+)
+_MARKER = re.compile(r"^\s*(?:[-*>+]|\d+[.)])?\s*")
 _OMISSION = "// ... [Omitted by CapoeiraAgent] ..."
 
 
@@ -60,11 +67,31 @@ def _truncated(raw: str) -> bool:
     return raw.count("'") % 2 == 1
 
 
+def _clean_line(raw: str) -> str:
+    """Remove ruído que o chat web adiciona ao redor do contrato.
+
+    O ``[TOOL_CALL]`` precisa continuar sendo o início lógico do campo, mas o
+    provedor pode ter renderizado a linha como item de lista/citação, em negrito
+    ou dentro de bloco de código — além de caracteres invisíveis do DOM."""
+    line = raw.replace("\u200b", "").replace("\ufeff", "").strip()
+    line = _MARKER.sub("", line)  # '- ', '> ', '1. ' etc. antes do prefixo
+    if line.startswith("**") and line.endswith("**"):
+        line = line[2:-2].strip()
+    elif line.startswith("__") and line.endswith("__"):
+        line = line[2:-2].strip()
+    if line.startswith("[TOOL_CALL]"):
+        line = line[len("[TOOL_CALL]"):].strip()
+    return line
+
+
 def parse_tool_calls(content: str) -> list[Step]:
-    """Extrai linhas '[TOOL_CALL] nome | chave=valor' do conteúdo."""
+    """Extrai linhas '[TOOL_CALL] nome | chave=valor' do conteúdo.
+
+    Aceita o contrato mesmo com a marcação que o chat web costuma acrescentar
+    (listas, citação, negrito, bloco de código, espaços não-quebráveis)."""
     steps: list[Step] = []
-    for match in TOOL_CALL_LINE.finditer(content):
-        line = match.group(1).strip()
+    for match in TOOL_CALL_ANYWHERE.finditer(content):
+        line = _clean_line(match.group(1))
         if _truncated(line):
             continue  # linha cortada => não executar
         fields = _split_pipe_fields(line)
