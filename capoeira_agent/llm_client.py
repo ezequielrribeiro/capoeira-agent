@@ -1,7 +1,7 @@
 """Cliente HTTP textual para o CapoeiraHost (pass-through verbatim): /api/chat.
 
-Comunicação unidirecional com o host: ele apenas injeta texto no LLM web; o
-retorno é obtido pelo agente via clipboard (ver ``listener``/``clipboard``).
+O host é usado apenas para injetar texto no LLM web; o retorno é obtido pela
+interface do agente (``/exec`` cola a resposta com os ``[TOOL_CALL]``).
 """
 from __future__ import annotations
 
@@ -61,8 +61,8 @@ class LLMClient:
         sem `role=tool`. Resultados de ferramenta (role=tool) são serializados
         como turno assistant com `[TOOL_RESULT] (id) conteúdo`. O host responde
         `accepted: {request_id}` (fire-and-forget) — a resposta do modelo NÃO
-        volta pelo host: o usuário copia o texto do chat web para o clipboard e
-        o agente o processa via listener."""
+        volta pelo host: o usuário cola o texto do chat web em `/exec` e o agente
+        o processa (parse dos [TOOL_CALL] + execução)."""
         pairs: list[tuple[str, str]] = [("model", self.model)]
         for msg in messages:
             role = msg.get("role", "user")

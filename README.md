@@ -9,9 +9,9 @@ locais quando necessário.
 - Comunicação: [CapoeiraHost](https://github.com/ezequielrribeiro/capoeira-host)
   (**protocolo textual pass-through verbatim**; endpoint `/api/chat` — o host não processa
   mais `tools`/`role=tool`: o agente formata o contrato de ferramentas no texto do próprio
-  system e interpreta a resposta verbatim). A comunicação com o host é **unidirecional**
-  (só injeção); o **retorno é obtido pelo agente via área de transferência**: o usuário copia
-  a resposta da LLM no chat web (Ctrl+C) e o agente detecta a mudança, faz o parse e executa.
+  system e interpreta a resposta verbatim). O host é usado **só para injeção**; os comandos
+  são **parseados e executados pela interface do agente**: você cola a resposta da LLM
+  (com as linhas `[TOOL_CALL]`) em `/exec`.
 - Extensibilidade: [Cli-Crivonansky](https://github.com/ezequielrribeiro/cli-crivonansky)
   (plugins de comando descobertos dinamicamente)
 
@@ -20,13 +20,13 @@ Spec: [`specs/capoeira-agent-spec.md`](specs/capoeira-agent-spec.md)
 ## Como funciona
 
 1. Suba o CapoeiraHost com a extensão carregada e uma aba autenticada do provedor aberta.
-2. `capoeira-agent "<pasta raiz do projeto>"` abre a TUI de monitoramento.
+2. `capoeira-agent "<pasta raiz do projeto>"` abre a TUI.
 3. `/init` — cria os artefatos iniciais do projeto (specs/skills/commands com exemplos).
 4. `/inject-environment` — envia ao chat ativo o ambiente do projeto + o dicionário de
    comandos que a LLM pode invocar (`[TOOL_CALL]`).
-5. `/listen` — inicia o monitor de clipboard. Quando a LLM emitir um `[TOOL_CALL]`, copie a
-   resposta no chat web (Ctrl+C): o agente detecta a mudança no clipboard, pede aprovação
-   (conforme a política), executa localmente e devolve o resultado ao chat via `/api/chat`.
+5. Quando a LLM emitir um `[TOOL_CALL]`, **cole a resposta** no agente:
+   `/exec <texto colado>` (ou `/exec --file caminho`). O agente faz o parse, pede aprovação
+   (conforme a política), executa localmente e devolve o resultado à LLM via `/api/chat`.
 
 ## Instalação
 
@@ -44,17 +44,29 @@ Veja `examples/config.yaml` e `examples/projects/sample.yaml`. Premissas por pro
 `projects/<slug>.yaml`.
 
 Variáveis de ambiente (overlay): `CAPOEIRA_AGENT_CONFIG_DIR`, `CAPOEIRA_AGENT_BASE_URL`,
-`CAPOEIRA_AGENT_MODEL`, `CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`,
-`CAPOEIRA_AGENT_CLIPBOARD_POLL`.
+`CAPOEIRA_AGENT_MODEL`, `CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`.
 
-Porta: o CapoeiraHost expõe a API em `127.0.0.1:8765` (só injeção). O agente não sobe
-API local — o retorno vem da área de transferência (opção `clipboard_poll`, em segundos).
+Porta: o CapoeiraHost expõe a API em `127.0.0.1:8765` (só injeção). O agente não sobe API
+local — a entrada dos comandos é a própria TUI (`/exec`).
 
 ## Comandos da TUI
 
-`/help` · `/init` · `/inject-environment` · `/listen [stop]` · `/status` ·
+`/help` · `/init` · `/inject-environment` · `/exec <texto|--file CAMINHO>` · `/status` ·
 `/permissions [auto|ask|readonly]` · `/model` · `/base-url` · `/timeout` · `/new-chat` ·
 `/sessions` · `/use` · `/reset` · `/generate-plugin` · `/quit`
+
+### `/exec` — executar os comandos da LLM
+
+Cole a resposta da LLM (com as linhas `[TOOL_CALL]`) após `/exec`:
+
+```text
+/exec Claro, vou listar:
+[TOOL_CALL] list_dir | path='.'
+```
+
+O agente faz o parse (tolerante a marcação de markdown/bullet/negrito), aplica a política
+de permissão, executa e envia o resultado de volta à LLM (`[TOOL_RESULT]`, round-trip em
+`new_chat=false`). Também é possível ler de um arquivo: `/exec --file resposta.txt`.
 
 ## Testes
 
@@ -63,4 +75,4 @@ API local — o retorno vem da área de transferência (opção `clipboard_poll`
 ```
 
 A suíte usa um fake CapoeiraHost (ThreadingHTTPServer) e não depende de navegador/serviços
-externos; o clipboard é injetado via monkeypatch.
+externos.

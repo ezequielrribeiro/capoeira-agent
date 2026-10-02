@@ -22,8 +22,8 @@ HINT = "capoeira-agent> "
 
 
 class _LiveStdout:
-    """Encaminha para o sys.stdout vigente a cada chamada. Assim os prints (do
-    listener em thread) saem pelo StdoutProxy do patch_stdout durante a TUI e a
+    """Encaminha para o sys.stdout vigente a cada chamada. Assim os prints dos
+    comandos saem pelo StdoutProxy do patch_stdout durante a TUI e a
     formatação rich/prompt_toolkit não é corrompida (sem sequências \x1b soltas)."""
 
     def write(self, data: str) -> int:
@@ -73,7 +73,7 @@ class ApprovalRequest:
 
 
 class Tui:
-    def __init__(self, config, session, registry, permissions, client, executor, listener=None,
+    def __init__(self, config, session, registry, permissions, client, executor, runner=None,
                  project_root=None, prompt_override=None) -> None:
         self.config = config
         self.session = session
@@ -81,7 +81,7 @@ class Tui:
         self.permissions = permissions
         self.client = client
         self.executor = executor
-        self.listener = listener
+        self.runner = runner
         self.project_root = project_root
         self.prompt_override = prompt_override  # callable(tool, params) -> "y"/"n"/"a" (testes)
 
@@ -141,20 +141,20 @@ class Tui:
                 break
 
     def _toolbar(self) -> str:
-        listen = "ON" if self.listener is not None and self.listener.listening else "off"
         with self._approval_lock:
             pend = len(self._approvals)
         return (f"[bold]{self.config.host.model}[/bold] · "
-                f"policy={self.permissions.mode} · listen={listen} · "
+                f"policy={self.permissions.mode} · "
                 f"session={self.session.session_name} · pendentes={pend}")
 
     # -- loop principal ------------------------------------------------------
     def run(self) -> None:
         completer = WordCompleter(self.registry.names(), ignore_case=False)
-        self.event(f"CapoeiraAgent — escutando execução de comandos da LLM via {self.config.host.base_url}")
+        self.event(f"CapoeiraAgent — host em {self.config.host.base_url}")
         self.event(f"Política: {self.permissions.mode} · modelo: {self.config.host.model} · "
                    f"new_chat={self.config.host.new_chat}")
-        self.event("Comandos: /help · /init · /inject-environment · /listen · /status · /quit")
+        self.event("Comandos: /help · /init · /inject-environment · /exec · /status · /quit · "
+                   "use /exec para colar a resposta da LLM e executar os [TOOL_CALL].")
 
         ps = PromptSession()
 
@@ -190,13 +190,15 @@ class Tui:
     def _dispatch(self, line: str) -> None:
         name, args = parse_line(line)
         if not name:
-            self.console.print("[dim]A TUI não envia prompts ao LLM — converse na interface web; "
-                               "use /... para comandos locais.[/dim]")
+            self.console.print("[dim]A TUI não envia prompts ao LLM — converse na interface web e "
+                               "use /exec para executar a resposta; /... para comandos locais.[/dim]")
             return
         cmd = self.registry.get(name)
         if cmd is None:
             self.console.print(f"[red]comando desconhecido: {name}[/red] (use /help)")
             return
+        # /exec recebe o texto após o comando, preservando espaços/quebras do colado.
+        cmd.raw_args = line[len(name):].lstrip()
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             try:
@@ -209,6 +211,4 @@ class Tui:
             self.console.print(output)
 
     def _shutdown(self) -> None:
-        if self.listener is not None and self.listener.listening:
-            self.listener.stop()
         self.session.save_state()

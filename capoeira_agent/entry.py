@@ -10,9 +10,8 @@ from .core.command import AgentContext
 from .core.loader import apply_context, load_all
 from .core.registry import CommandRegistry
 from .executor import Executor
-from .injector import inject_environment
-from .listener import Listener
 from .permissions import PermissionGate
+from .runner import Runner
 from .session import Session
 from .tui.app import Tui
 
@@ -99,21 +98,11 @@ def bootstrap(opts: dict, *, prompt_override=None) -> Tui:
               project_root=project_root, prompt_override=prompt_override)
     permissions.ask_user = tui.ask_approval
 
-    def _inject_if_needed() -> str:
-        if session.injected:
-            return ""
-        return inject_environment(client, session, registry, session.premises,
-                                  new_chat=config.host.new_chat)
-
-    listener = Listener(client, session, permissions, executor, registry,
-                        poll_interval=config.host.clipboard_poll,
-                        inject_environment=_inject_if_needed,
-                        on_event=tui.event,
-                        new_chat=config.host.new_chat)
+    runner = Runner(session, permissions, executor, registry, client, on_event=tui.event)
 
     context = AgentContext(config, session, client, registry, permissions, tui, project_root)
-    context.listener = listener
-    tui.listener = listener
+    context.runner = runner
+    tui.runner = runner
     apply_context(registry, context)
     return tui
 

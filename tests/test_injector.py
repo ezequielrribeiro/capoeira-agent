@@ -46,7 +46,7 @@ def test_inject_command_prints_ack(fake_host, tmp_path, capsys):
     config = SimpleNamespace(host=SimpleNamespace(model="gemini-pro", new_chat=False))
     cmd = InjectEnvironmentCommand()
     cmd.context = SimpleNamespace(client=client, session=session, registry=registry,
-                                  listener=None, config=config)
+                                  runner=None, config=config)
 
     cmd.execute([])
 

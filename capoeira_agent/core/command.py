@@ -46,7 +46,7 @@ class AgentContext:
         self.permissions = permissions
         self.tui = tui
         self.project_root = project_root
-        self.listener = None
+        self.runner = None
 
     def echo(self, text: str) -> None:
         if self.tui is not None:

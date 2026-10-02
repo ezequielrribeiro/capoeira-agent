@@ -36,7 +36,7 @@ def test_load_all_loads_package_commands(tmp_path):
     load_all(reg, tmp_path / "commands", None)
     assert reg.get("/help") is not None
     assert reg.get("/init") is not None
-    assert reg.get("/listen") is not None
+    assert reg.get("/exec") is not None
 
 
 def test_plugin_execute_remote(tmp_path):

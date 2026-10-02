@@ -1,7 +1,7 @@
 # 📜 Software Specification — CapoeiraAgent
 
 **Projeto:** CapoeiraAgent
-**Versão:** `0.1.3` — Draft
+**Versão:** `0.1.4` — Draft
 **Status:** `Proposta para revisão`
 **Data:** 1 de Outubro de 2026
 
@@ -37,7 +37,7 @@ comandos de projeto/plugins), caso necessário.
 | Base | Papel |
 |---|---|
 | **CapoeiraCode** | Arquitetura de agente, contrato de ferramentas ([TOOLS] textual), execução de tools (`read_file`, `list_dir`, `run_shell`, `run_python`, `write_file`, `ask_user`, `done`), aplicador atômico, armazenamento/artefatos, política de permissão. |
-| **CapoeiraHost (>= 2.3.0)** | Único backend de comunicação, usado de forma **unidirecional**: `/api/chat` (textual) injeta o texto no LLM web e devolve a resposta **sincronamente**. O agente não mantém API local nem registro — o **retorno** é lido pelo agente da **área de transferência** (o usuário copia a resposta do chat com Ctrl+C). |
+| **Host (>= 2.3.0)** | Único backend de comunicação, usado de forma **unidirecional**: `/api/chat` (textual) injeta o texto no LLM web (síncrono). O agente não mantém API local nem registro; a **entrada dos comandos é a TUI** (`/exec`). |
 | **Cli-Crivonansky** | Framework CLI extensível: `core/command.py`, `registry`, `loader` (descoberta dinâmica de plugins via importlib), `context`, `parser`. |
 
 ### 1.3. Problema de Negócio
@@ -64,9 +64,9 @@ permissão do usuário.
 │                            CAPOEIRA AGENT (Python)                               │
 │                                                                                   │
 │  ┌──────────────┐    ┌───────────────────┐    ┌───────────────────────────────┐   │
-│  │ TUI          │    │ MONITOR           │    │ PERMISSION GATE               │   │
-│  │  · monitor   │◀──▶│  · clipboard poll │───▶│  · auto | ask | readonly      │   │
-│  │  · aprovação │    │  · handle_response│    │  · y/n/a (sempre na sessão)   │   │
+│  │ TUI          │    │ /exec             │    │ PERMISSION GATE               │   │
+│  │  · monitor   │◀──▶│  · parse [TOOL_CALL]│──▶│  · auto | ask | readonly      │   │
+│  │  · aprovação │    │  · runner (gate+exec)│ │  · y/n/a (sempre na sessão)   │   │
 │  │  · /comandos │    │  · round-trip     │    └──────────────┬────────────────┘   │
 │  │  · plugins   │    └─────────┬─────────┘                   │ aprovou?           │
 │  └──────────────┘              │                             ▼                    │
@@ -92,9 +92,9 @@ permissão do usuário.
 │                       WEB LLM INTERFACE (aba autenticada)                     │
 │                usuário continua conversando NORMALMENTE aqui                  │
 └────────────────────────────────┬───────────────────────────────────────────────┘
-                                 │ Ctrl+C (usuário copia a resposta)
+                                 │ usuário cola a resposta na TUI do agente
 ┌────────────────────────────────▼───────────────────────────────────────────────┐
-│                 CLIPBOARD DO SO (monitorado pelo agente)                      │
+│                  ENTRADA DE COMANDOS PELA TUI — /exec <texto|--file>          │
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -110,7 +110,7 @@ permissão do usuário.
 | **Sessão do agente** | Contexto local por projeto (config + workspace + histórico). Persistente e retomável. |
 | **Turno** | Unidade de transcrição do chat: `[USER] ...` ou `[ASSISTANT] ...` (contrato textual do host). |
 | **Dicionário de comandos** | Contrato `tools` (textual) enviado ao host; define o que a LLM pode invocar. |
-| **Escuta (listening)** | Monitor de **clipboard** do agente: detecta a cópia da resposta do LLM (Ctrl+C) e a processa. |
+| **Entrada de comandos** | A TUI do agente: o usuário cola a resposta da LLM (com `[TOOL_CALL]`) em `/exec`; o agente faz o parse e executa. |
 | **Permission gate** | Política que decide se um comando remoto é executado, questionado ou negado. |
 | **Comando (tool)** | Operação executável localmente (core tool ou comando-plugin). Invocável pela LLM via `[TOOL_CALL]` e/ou via TUI (`/...`). |
 
@@ -134,12 +134,12 @@ permissão do usuário.
 Protocolo único: **`application/x-www-form-urlencoded`** nas requisições e **`text/plain`**
 nas respostas. Sem JSON no fio (exceto `models.json` do host e o bridge WS host⇄extensão).
 
-> **Atualização host >= 2.3.0 (unidirecional + clipboard):** o host passou a ser
+> **Atualização host >= 2.3.0 (só injeção + entrada pela TUI):** o host passou a ser
 > **só injeção**: `/api/chat` e `/api/generate` devolvem a resposta do LLM **síncronamente**
 > no corpo (`text/plain`) — não há mais push, `/api/app/*` nem watcher de `CHAT_UPDATE`.
 > O agente continua usando o host apenas para injetar (`/inject-environment` e round-trip);
-> o **retorno** é obtido do **clipboard** do SO (`clipboard.py` + `listener`): o usuário
-> copia a resposta do chat (Ctrl+C) e o agente detecta a mudança, faz o parse e executa.
+> os comandos são **parseados e executados pela interface do agente**: o usuário cola a
+> resposta do chat (com `[TOOL_CALL]`) em `/exec` e o agente faz o parse e executa.
 
 ### 5.1. `POST /api/chat` — conversa / round-trip de tools
 
@@ -159,22 +159,24 @@ Campos: `model`*, pares repetidos `role`/`content`, `stream`, `new_chat`, `optio
   com conteúdo `[TOOL_RESULT] (id) resultado` — `llm_client.chat` faz essa serialização
   quando uma mensagem interna tem `role=tool`/`tool_call_id`. Envia-se **apenas o resultado
   do turno**, nunca o histórico/header (evita que o modelo releia `[TOOL_CALL]` antigos).
-- Resposta: `text/plain`, devolvida **sincronamente** pelo host. Para o envio de injeção, o
-  ack `accepted: {request_id}` de versões anteriores deixou de existir; a leitura da resposta
-  do modelo passa a ser via **clipboard**.
+- Resposta: `text/plain`, devolvida **sincronamente** pelo host; o ack `accepted: {request_id}`
+  de versões anteriores deixou de existir.
 - **Valores** `[TOOL_CALL]`: números/booleans diretos; strings com espaço entre `'...'`;
   `|` fora de aspas separa argumentos; múltiplas linhas = chamadas paralelas.
 
-### 5.2. Retorno via clipboard (usuário → agente)
+### 5.2. Entrada de comandos pela TUI (`/exec`)
 
-O host **não entrega** a resposta: o usuário copia o texto do LLM no chat web (Ctrl+C) e o
-agente monitora a área de transferência do SO (`clipboard.py`, polling configurável via
-`host.clipboard_poll`). Ao detectar mudança, o texto é normalizado, os `[TOOL_CALL]` são
-extraídos (`parse_tool_calls`) e o turno é processado como em §6.
+O host **não entrega** a resposta. O usuário cola o texto do LLM (com os `[TOOL_CALL]`) no
+agente: `/exec <texto>` ou `/exec --file CAMINHO`. O `runner.Runner`:
 
-- Sem API local no agente, sem registro no host, sem polling HTTP.
-- Turnos idênticos recentes são ignorados (proteção anti-loop) e há teto de rounds (§6.3).
-- Prosa sem `[TOOL_CALL]` é ignorada (a conversa continua na aba Web, visível ao usuário).
+1. extrai os `[TOOL_CALL]` do texto (`steps.parse_tool_calls` — tolerante à marcação de
+   markdown/bullet/negrito e a caracteres invisíveis do DOM);
+2. aplica o **permission gate** e executa cada comando (§6);
+3. faz o **round-trip** enviando apenas o resultado do turno à LLM (`/api/chat`,
+   `new_chat=false`).
+
+- Sem API local no agente, sem registro no host, sem listener de clipboard.
+- Prosa sem `[TOOL_CALL]` não faz nada (a conversa continua na aba Web, visível ao usuário).
 
 ### 5.3. Conteúdo binário/arquivos — base64 estrito
 
@@ -186,24 +188,21 @@ instruindo o reenvio em uma única linha. (Contrato herdado do CapoeiraCode §5.
 
 ---
 
-## 6. Monitor de Clipboard (Listener) — fluxo de funcionamento
+## 6. Execução pela TUI — fluxo de funcionamento
 
 ### 6.1. Ciclo nominal
 
 1. **Preparação** — `capoeira-agent "<pasta raiz>"` abre a TUI; cria/recarrega a sessão do
-   projeto; resolve configuração (host, modelo, política). O monitor está **parado** até
-   iniciado (ver `/listen`).
+   projeto; resolve configuração (host, modelo, política).
 2. **Injeção de ambiente** — `/inject-environment` envia `POST /api/chat` com
    `new_chat=false` + mensagem `role=system` contendo o perfil do projeto e o **contrato
    completo de tools embutido no texto** (linhas `[TOOL] ...` + instrução
    `[TOOL_CALL] nome | chave=valor` — `prompts.build_tools_block`). Como é a **primeira
    interação da sessão**, o system do perfil é emitido na aba aberta. A partir daí a LLM
    **conhece os comandos disponíveis**.
-3. **Monitor** — `/listen` inicia a thread de polling do **clipboard** (`clipboard.py`,
-   intervalo `host.clipboard_poll`). Não há API local nem polling HTTP: o retorno vem da
-   área de transferência.
-4. **Processamento da mudança** — ao detectar mudança no clipboard, o texto é normalizado;
-   se contiver `[TOOL_CALL] nome | chave=valor` (1+ linhas), os comandos são executados:
+3. **Entrada do comando** — quando a LLM responde com um `[TOOL_CALL]`, o usuário **cola a
+   resposta na TUI**: `/exec <texto>` (ou `/exec --file CAMINHO`).
+4. **Parse** — `runner.Runner.run_text` extrai os `[TOOL_CALL]` e classifica:
    - **Sem** `[TOOL_CALL]` ⇒ turno de prosa (a LLM respondeu normalmente); nada a executar.
    - **Com** `[TOOL_CALL]` ⇒ comandos a executar.
 5. **Permission gate** — para cada chamada: leitura automática; escrita/execução conforme
@@ -215,24 +214,24 @@ instruindo o reenvio em uma única linha. (Contrato herdado do CapoeiraCode §5.
    serializado **no texto do próprio transcript** como turno `assistant` com
    `[TOOL_RESULT] (call_N) ...` via `POST /api/chat` (`new_chat=false`). **Envia-se apenas o
    resultado do turno**, nunca o histórico/header (evita loop). A resposta seguinte aparece na
-   aba Web; o usuário copia de novo e o ciclo se repete até a resposta ser **prosa final**
+   aba Web; o usuário cola de novo e o ciclo se repete até a resposta ser **prosa final**
    (sem `[TOOL_CALL]`), com proteção de limite de rounds.
 
 ### 6.2. Controle
 
 | Ação | Descrição |
 |---|---|
-| `/listen` | inicia o monitor de clipboard. Se ainda não houve injeção, recomenda `/inject-environment` antes. |
-| `/listen stop` | encerra o monitor de clipboard. |
-| `Ctrl+C` (no chat web) | copia a resposta da LLM — é o gatilho do processamento. |
+| `/exec <texto>` | executa os `[TOOL_CALL]` do texto colado (resposta da LLM). |
+| `/exec --file CAMINHO` | idem, lendo o texto de um arquivo. |
+| `Ctrl+C` / `Ctrl+D` | sair (na linha de comando da TUI). |
 
 ### 6.3. Robustez
 
-- O agente **não faz polling HTTP**: o retorno vem do clipboard; uso de rede só na injeção.
-- Falha de transiente (`503` offline) na injeção/round-trip ⇒ log + retomada; não desliga o
-  monitor.
-- Proteção contra loop/reexecução: turnos idênticos recentes são ignorados (janela de 30s) e
-  há limite de rounds consecutivos (máx. 12).
+- Uso de rede só na injeção e no round-trip; a entrada é local (cola na TUI).
+- Falha de transiente (`503` offline) na injeção/round-trip ⇒ log + retomada.
+- Proteção contra loop/reexecução: limite de rounds consecutivos (máx. 12).
+- Parse tolerante à marcação do chat web (listas, citação, negrito, bloco de código,
+  caracteres invisíveis) — ver `steps.parse_tool_calls`.
 
 ---
 
@@ -283,7 +282,7 @@ Se for necessário chamar uma ferramenta, emita EXATAMENTE uma linha por chamada
 - **Registro:** `core/registry.py` — `register/get/all`.
 - **Descoberta:** `core/loader.py` — importlib em `commands/` (classes que herdam de
   `Command`; nome prefixado com `/` na TUI).
-- **Contexto:** `core/context.py` — injeção de dependências (sessão, client, listener,
+- **Contexto:** `core/context.py` — injeção de dependências (sessão, client, runner,
   permissions, TUI).
 - **Parser:** `core/parser.py` — entrada `/comando --flag valor`.
 - **Geração:** `/generate-plugin --name <nome>` cria um plug-in novo (estilo Crivonansky),
@@ -343,9 +342,9 @@ aprovações pendentes, histórico de comandos executados/negados compatível co
 |---|---|
 | `/help` | ajuda |
 | `/init` | cria os **artefatos iniciais do projeto** (árvore de arquivos; pastas `specs/` e `skills/` com exemplos; pasta de comandos-plugin com exemplo; `README` de uso). **Local a validar** (§11.2). |
-| `/inject-environment` | envia ao chat ativo o prompt com o ambiente do projeto + **dicionário de comandos** (`tools`), via `POST /api/chat` (`new_chat=false`). O host injeta e devolve a resposta sincronamente (descartada); o retorno útil vem pelo clipboard. Idempotente; re-emite (a pedido) para atualizar o dicionário. |
-| `/listen` · `/listen stop` | inicia/encerra o **monitor de clipboard** (gatilho do processamento é o Ctrl+C no chat). |
-| `/status` | provider/modelo online, sessão, política, estado do monitor (poll do clipboard). |
+| `/inject-environment` | envia ao chat ativo o prompt com o ambiente do projeto + **dicionário de comandos** (`tools`), via `POST /api/chat` (`new_chat=false`). O host injeta e devolve a resposta sincronamente. Idempotente; re-emite (a pedido) para atualizar o dicionário. |
+| `/exec <texto\|--file CAMINHO>` | faz o parse dos `[TOOL_CALL]` do texto colado (resposta da LLM), aplica a política, executa e faz o round-trip do resultado. |
+| `/status` | provider/modelo online, sessão, política, tools expostas e entrada de comandos. |
 | `/permissions [auto|ask|readonly]` | ver/trocar política. |
 | `/model M` · `/base-url URL` · `/timeout SEG` | parâmetros de comunicação (estilo CapoeiraCode). |
 | `/new-chat [true|false]` | alternar reuso do chat na aba. |
@@ -368,7 +367,7 @@ Resolução: `CAPOEIRA_AGENT_CONFIG_DIR` → `%APPDATA%\CapoeiraAgent` → `~/.c
 
 ```
 CapoeiraAgent/
-├── config.yaml               # host, modelo, política, new_chat, clipboard_poll, python
+├── config.yaml               # host, modelo, política, new_chat, python
 ├── projects/*.yaml           # premissas por projeto (estilo CapoeiraCode: name, desc, stack, comandos-plugin selecionados)
 ├── commands/                 # plugins compartilhados (opcional)
 ├── specs/ · skills/ · prompts/  # instruções por projeto (carregadas na injeção de ambiente)
@@ -410,7 +409,6 @@ host:
   model: gemini-pro
   timeout: 180
   new_chat: false          # default do agente
-  clipboard_poll: 0.5      # intervalo (s) de polling da área de transferência
 policy:
   mode: ask                # auto | ask | readonly
   auto_plugins: []         # nomes de comandos sempre autorizados (modo ask)
@@ -422,7 +420,7 @@ projects:
 ### 12.2. Env (overlay)
 
 `CAPOEIRA_AGENT_CONFIG_DIR`, `CAPOEIRA_AGENT_BASE_URL`, `CAPOEIRA_AGENT_MODEL`,
-`CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`, `CAPOEIRA_AGENT_CLIPBOARD_POLL`.
+`CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`.
 
 ### 12.3. Por projeto
 
@@ -445,11 +443,8 @@ python -m venv .venv
 
 ### 13.2. Reconhecimento
 
-Python CLI + `Path`/`os` (`C:\...` vs `/...`); subprocess sem shell onde possível; nenhuma
-dependência nativa compilada (apenas stdlib + `prompt_toolkit` + `rich` + `PyYAML`). A leitura
-da área de transferência é feita por plataforma em `clipboard.py` (Windows via Win32/ctypes
-com fallback PowerShell; macOS via `pbpaste`; Linux via `wl-paste`/`xclip`/`xsel`) — **sem
-dependências externas**.
+Python CLI + `Path`/`os` (`C:\...` vs `/...`); subprocess sem shell onde possível; **sem
+dependências nativas** (apenas stdlib + `prompt_toolkit` + `rich` + `PyYAML`).
 
 ---
 
@@ -460,7 +455,7 @@ dependências externas**.
 - **RNF-04 (Atomicidade):** `write_file` e lotes multi-arquivo aplicados via
   tmp + `os.replace` all-or-nothing (herdado do CapoeiraCode); sem escrita parcial.
 - **RNF-05 (Não-interferência):** o agente nunca dispara geração por conta própria; só reage
-  a comandos **copiados pelo usuário** (clipboard) — a interface web continua sendo a
+  a comandos **trazidos pelo usuário** para a TUI (`/exec`) — a interface web continua sendo a
   experiência primária.
 - **RNF-06 (Volume conservador):** 1 requisição em andamento por vez; respeito à fila FIFO e
   ao disclaimer do host.
@@ -482,8 +477,7 @@ capoeira-agent/
 │   ├── prompts.py           # contrato TOOLS_CONTRACT; builder do /inject-environment
 │   ├── config.py            # resolve config dir; config.yaml + env overlay; premises
 │   ├── session.py           # configs/<slug>/ + session.jsonl
-│   ├── clipboard.py         # leitura da área de transferência do SO (multiplataforma)
-│   ├── listener.py          # monitor de clipboard + round-trip de tools
+│   ├── runner.py            # parse [TOOL_CALL] + gate + execução + round-trip (/exec)
 │   ├── permissions.py       # PermissionGate (auto/ask/readonly; y/n/a na sessão)
 │   ├── executor.py          # apply_step: read/list/run_shell/run_python/write_file/ask_user
 │   ├── applier.py           # aplicador atômico multi-arquivo (write_file)
@@ -496,12 +490,12 @@ capoeira-agent/
 │   │   ├── parser.py        # parsing `/comando --flag valor`
 │   │   └── context.py       # injeção de dependências
 │   ├── commands/            # plugins core (descoberta automática)
-│   │   ├── init.py · inject_environment.py · listen.py · status.py
+│   │   ├── init.py · inject_environment.py · exec.py · status.py
 │   │   ├── permissions.py · sessions.py · help.py · generate_plugin.py ...
 │   └── tui/
 │       ├── app.py           # prompt_toolkit + rich; monitor + input de comandos
 │       └── monitor.py       # painel de estado/eventos/aprovações
-├── tests/                   # pytest (client fake do host; clipboard monkeypatch; policies; tools)
+├── tests/                   # pytest (client fake do host; policies; executor; runner)
 ├── examples/                # config.yaml template + projects/<slug>.yaml
 ├── pyproject.toml           # entry `capoeira-agent` (pip install -e .)
 ├── requirements.txt · requirements-dev.txt
@@ -522,14 +516,11 @@ class LLMClient(base_url, model, timeout):
 class LLMRequestError(Exception)
 serialize_tools(tools: list[dict]) -> str
 
-# clipboard.py
-def read_clipboard() -> str | None
-
-# listener.py
-class Listener(client, session, permissions, tui):
-    start() / stop()
-    @property listening: bool
-    handle_response(text: str) -> None       # parse [TOOL_CALL] → gate → exec → round-trip
+# runner.py
+class Runner(session, gate, executor, registry, client, on_event=None):
+    run_text(text, *, send_roundtrip=True) -> ExecOutcome   # parse → gate → exec → round-trip
+class ExecOutcome:
+    steps; executed; unknown; messages; roundtrip_sent; roundtrip_reply
 
 # permissions.py
 class PermissionGate(mode):
@@ -556,7 +547,7 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 |---|---|
 | **I1 — Esqueleto e host** | entry + TUI mínima + `config.py` + `llm_client` (`/api/chat`, só injeção) + teste com host fake. |
 | **I2 — Framework de comandos** | `core/*` (Crivonansky) + `commands/` core + `/init` + `/generate-plugin`. |
-| **I3 — Monitor + permissions** | clipboard (`clipboard.py`) + `handle_response`, permission gate (auto/ask/readonly, y/n/a), executor core + applier atômico. |
+| **I3 — Execução + permissions** | `runner.py` (parse+gate+execução) + `/exec` na TUI, permission gate (auto/ask/readonly, y/n/a), executor core + applier atômico. |
 | **I4 — Injeção e round-trip** | `/inject-environment` (dicionário), base64 estrito, round-trip `role=tool`. |
 | **I5 — Sessões e monitor** | `session.jsonl`, multi-sessões, painel de monitor. |
 | **I6 — Premises/artefatos** | `projects/<slug>.yaml`, specs/skills/prompts, árvore do `/init` customizável. |
@@ -570,7 +561,7 @@ def inject_environment(client, session, registry, new_chat=False) -> None
    workspace no config).
 2. **Base de tools** — manutenção dos 7 tools do CapoeiraCode como core (sugerido) vs
    conjunto enxuto próprio.
-3. **`/listen` público** (comando da TUI inicia o monitor de clipboard) vs monitor automático ao abrir.
+3. **`/exec` na TUI** (entrada dos comandos) — evolução: aceitar colar direto sem `/exec`?
 4. **Hierarquia de plugins** — projeto → config → package (ordem de precedência).
 5. **Política default** — `ask` para escrita/execução (sugerido), leitura automática.
 6. **Versionamento mínimo** do CapoeiraHost: `>= 2.3.0` (modo síncrono e unidirecional).
@@ -584,4 +575,5 @@ def inject_environment(client, session, registry, new_chat=False) -> None
 | `0.1.0` | 15/09/2026 | Draft inicial da spec baseado em CapoeiraCode v6.0.0, CapoeiraHost **v2.1.0** (novos `/api/chat/read` e `/api/chat/watch` para o modo escuta) e Cli-Crivonansky (framework de plugins). |
 | `0.1.1` | 21/09/2026 | Adequação ao CapoeiraHost **pass-through verbatim** (commit `d1d00ab`): sem `tools`/`role=tool`/`tool_call_id` na API; contrato de tools embutido no texto da mensagem de sistema (`prompts.build_tools_block`); round-trip de resultados via turno `assistant` com `[TOOL_RESULT] (id) ...` (`llm_client.chat`). |
 | `0.1.2` | 28/09/2026 | Adequação ao CapoeiraHost **push** (commit `fb55cbb`): `/api/chat` responde `accepted: {request_id}` (fire-and-forget) e entrega a resposta via `POST /api/capoeira/response` na app registrada em `/api/app/register`. O agente sobe a API local (`receiver.py`, FastAPI/uvicorn) e processa respostas via `listener.handle_response` — sem polling (`/api/chat/read`/`watch` removidos). Removido o `Dockerfile`; a API do agente escuta em `127.0.0.1:8767`, porta distinta da API do host. |
-| `0.1.3` | 01/10/2026 | Comunicação **unidirecional**: o CapoeiraHost passa a ser só injeção (modo **síncrono**, v2.3.0) e o **retorno é lido da área de transferência** (`clipboard.py` + monitor em `listener`). Removidos o receiver FastAPI/uvicorn do agente, o registro de app e o polling HTTP; o host removeu push, `/api/app/*` e watcher. Round-trip envia apenas o resultado do turno (`new_chat=false`) e há proteções anti-loop. |
+| `0.1.3` | 01/10/2026 | Comunicação **unidirecional**: o CapoeiraHost passa a ser só injeção (modo **síncrono**, v2.3.0). Removidos o receiver FastAPI/uvicorn do agente, o registro de app e o polling HTTP; o host removeu push, `/api/app/*` e watcher. Round-trip envia apenas o resultado do turno (`new_chat=false`). |
+| `0.1.4` | 01/10/2026 | **Entrada de comandos pela TUI**: o listener de clipboard foi abandonado por fragilidade. A resposta da LLM é colada em `/exec <texto\|--file CAMINHO>`; `runner.Runner` faz o parse (tolerante a markdown/bullet/negrito — `steps.parse_tool_calls`), aplica o gate, executa e faz o round-trip. Removidos `clipboard.py`, `listener.py`, `/listen` e a opção `clipboard_poll`. |

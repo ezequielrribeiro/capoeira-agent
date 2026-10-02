@@ -13,5 +13,5 @@ class StatusCommand(Command):
             self.context.registry,
             self.context.permissions,
             self.context.client,
-            self.context.listener,
+            self.context.runner,
         ))
