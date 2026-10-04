@@ -40,8 +40,15 @@ python -m venv .venv
 ## Configuração
 
 Diretório de config: `CAPOEIRA_AGENT_CONFIG_DIR` → `%APPDATA%\CapoeiraAgent` → `~/.capoeira-agent`.
-Veja `examples/config.yaml` e `examples/projects/sample.yaml`. Premissas por projeto em
-`projects/<slug>.yaml`.
+Veja `examples/config.yaml`, `examples/projects/sample.yaml` e `examples/tools.yaml`. Premissas
+por projeto em `projects/<slug>.yaml`.
+
+### `tools.yaml` — comandos injetados (editável)
+
+O dicionário de comandos enviado à LLM pelo `/inject-environment` é controlado por
+`<config_dir>/tools.yaml`: cada comando com `enabled: false` é removido do bloco `[TOOL]`.
+`/init` cria o arquivo com todos os comandos habilitados; sem o arquivo, todos permanecem
+habilitados.
 
 Variáveis de ambiente (overlay): `CAPOEIRA_AGENT_CONFIG_DIR`, `CAPOEIRA_AGENT_BASE_URL`,
 `CAPOEIRA_AGENT_MODEL`, `CAPOEIRA_AGENT_NEW_CHAT`, `CAPOEIRA_AGENT_POLICY`.

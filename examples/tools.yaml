@@ -1,0 +1,18 @@
+# CapoeiraAgent — exemplo de tools.yaml global
+# Controla quais comandos aparecem no dicionário injetado pelo /inject-environment.
+# Coloque em <config_dir>/tools.yaml (mesma pasta do config.yaml).
+tools:
+  - name: read_file
+    enabled: true
+  - name: list_dir
+    enabled: true
+  - name: run_shell
+    enabled: true
+  - name: run_python
+    enabled: true
+  - name: write_file
+    enabled: true
+  - name: ask_user
+    enabled: true
+  - name: done
+    enabled: true

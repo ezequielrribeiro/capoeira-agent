@@ -19,6 +19,7 @@ def status_block(config, session, registry, permissions, client, runner=None) ->
     sl.append(f"modelo: {config.host.model} (provider online: {len(providers)})")
     sl.append(f"new_chat: {config.host.new_chat}")
     sl.append(f"política: {permissions.mode} · sessão: {session.session_name}")
+    registry.refresh_disabled_tools(session.config_dir)
     sl.append("entrada de comandos: TUI (/exec <texto|--file CAMINHO>) · revision: "
               f"{session.revision}")
     sl.append(f"comandos registrados: {len(registry.names())} "

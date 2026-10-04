@@ -8,6 +8,12 @@ from .command import Command, ToolDef
 class CommandRegistry:
     def __init__(self) -> None:
         self._commands: dict[str, Command] = {}
+        self.disabled_tools: set[str] = set()  # via tools.yaml (config dir)
+
+    def refresh_disabled_tools(self, config_dir) -> None:
+        from ..tools_config import disabled_tools
+
+        self.disabled_tools = disabled_tools(config_dir)
 
     def register(self, name: str, command: Command) -> None:
         self._commands[name] = command
@@ -32,7 +38,7 @@ class CommandRegistry:
             td = cmd.tool_def
             if td is not None:
                 tools.append(td.to_dict())
-        return tools
+        return [t for t in tools if t["name"] not in self.disabled_tools]
 
     def get_tool(self, name: str) -> dict | None:
         for td in toolsdef.CORE_TOOL_DEFS:

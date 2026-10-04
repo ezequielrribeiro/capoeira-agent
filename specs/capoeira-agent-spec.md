@@ -258,6 +258,23 @@ Cada plug-in pode expor uma tool ao declarar `tool_def`. O dicionário completo 
 `/inject-environment` e **atualizado a cada injeção**. Comandos de ferramenta da TUI que **não**
 expõem `tool_def` ficam fora do dicionário (inacessíveis à LLM — princípio de menor privilégio).
 
+### 7.2b. Configuração editável dos comandos injetados — `tools.yaml`
+
+O usuário edita `<config_dir>/tools.yaml` para habilitar/desabilitar quais comandos entram no
+dicionário injetado:
+
+```yaml
+tools:
+  - name: read_file
+    enabled: true
+  - name: write_file
+    enabled: false
+```
+
+Cada entrada `enabled: false` remove a tool do bloco `[TOOL]` (commandos ausentes do arquivo
+permanecem habilitados). `/init` gera o arquivo padrão com todas as tools habilitadas; o
+`/status` e a contagem do `/inject-environment` refletem o conjunto filtrado.
+
 ### 7.3. Contrato de tools (bloco embutido no texto — `prompts.build_tools_block`)
 
 Como o host é **pass-through**, o dicionário viaja no conteúdo da mensagem `role=system` do

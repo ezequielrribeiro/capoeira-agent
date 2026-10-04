@@ -54,3 +54,58 @@ def test_inject_command_prints_ack(fake_host, tmp_path, capsys):
     assert "ambiente injetado" in out
     assert "accepted: " in out
     assert session.injected
+
+
+def test_inject_filters_disabled_tools(fake_host, tmp_path):
+    fh = fake_host
+    ctrl = fh["ctrl"]
+    session = _make(tmp_path)
+    cfg_dir = tmp_path / "cfg"
+    (cfg_dir).mkdir(exist_ok=True)
+    (cfg_dir / "tools.yaml").write_text(
+        "tools:\n  - name: write_file\n    enabled: false\n", encoding="utf-8")
+    registry = CommandRegistry()
+    client = LLMClient(fh["base"], "gemini-pro", timeout=10)
+
+    inject_environment(client, session, registry, None, new_chat=False)
+
+    _, form = ctrl.chat_requests[0]
+    content = dict(form)["content"]
+    assert "[TOOL] name=read_file" in content
+    assert "[TOOL] name=write_file" not in content
+    # a contagem reflete o filtro
+    assert all(t["name"] != "write_file" for t in registry.tool_definitions())
+
+
+def test_inject_without_tools_yaml_keeps_all(fake_host, tmp_path):
+    fh = fake_host
+    ctrl = fh["ctrl"]
+    session = _make(tmp_path)
+    registry = CommandRegistry()
+    client = LLMClient(fh["base"], "gemini-pro", timeout=10)
+
+    inject_environment(client, session, registry, None, new_chat=False)
+
+    _, form = ctrl.chat_requests[0]
+    content = dict(form)["content"]
+    assert "[TOOL] name=write_file" in content
+
+
+def test_init_creates_tools_yaml(tmp_path):
+    from types import SimpleNamespace as NS
+    from capoeira_agent.commands.init import InitCommand
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    session = Session(proj, config_dir=tmp_path / "cfg")
+    registry = CommandRegistry()
+    cmd = InitCommand()
+    cmd.context = NS(project_root=proj, session=session, registry=registry)
+
+    cmd.execute([])
+
+    path = tmp_path / "cfg" / "tools.yaml"
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "name: read_file" in text
+    assert "enabled: true" in text

@@ -26,6 +26,7 @@ def inject_environment(client, session, registry, premises=None, *, new_chat: bo
 
     O host responde com `accepted: {request_id}` e entrega a resposta do modelo
     via push — o agente não aguarda nem faz polling aqui."""
+    registry.refresh_disabled_tools(session.config_dir)
     tools = registry.tool_definitions()
     blocks = build_environment_blocks(session, premises)
     env_text = build_environment_message(
